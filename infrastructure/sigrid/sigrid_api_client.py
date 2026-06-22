@@ -22,7 +22,9 @@ from typing import Any
 
 import httpx
 
-from domain.models.sigrid_models import EmpleadoRow, ObraRow, TipoHoraRow
+from domain.models.sigrid_models import (
+    EmpleadoRow, HmoRow, ObraRow, PartidaRow, RecursoRow, TipoHoraRow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,48 @@ SELECT
 FROM auxhor
 WHERE (auxhor.fecbaj IS NULL OR auxhor.fecbaj = 0)
 ORDER BY auxhor.ext, auxhor.cod
+"""
+
+
+# Partidas del presupuesto de una obra (obrparpar). padide = capitulo padre
+# (raices padide=0). cod/res/tex describen; tipdes=0 activa; cosindide marca
+# tipo de coste indirecto. El arbol, la clasificacion CD/CI/CP (por capitulo
+# raiz) y la deteccion de hoja se hacen en partida_catalog.py.
+_SQL_PARTIDAS = """\
+SELECT
+    obrparpar.ide       AS ide,
+    obrparpar.padide    AS padide,
+    obrparpar.cod       AS cod,
+    obrparpar.res       AS res,
+    obrparpar.tex       AS tex,
+    obrparpar.tipdes    AS tipdes,
+    obrparpar.cosindide AS cosindide,
+    obrparpar.unimed    AS unimed
+FROM obrparpar
+WHERE obrparpar.obride = ?
+"""
+
+
+# Recursos (res extiende con; ide = con.ide). cif = DNI/NIF; conide =
+# empleado asociado (emp). Maestro para resolver el recurso por DNI/empleado.
+_SQL_RECURSOS = """\
+SELECT
+    res.ide    AS ide,
+    res.cif    AS cif,
+    res.conide AS conide
+FROM res
+"""
+
+# Partes de trabajo (hmo) de una obra: ide + recurso + ano + mes. Para
+# localizar el parte donde se imputarian las horas (reside+obride+ano+mes).
+_SQL_HMO_OBRA = """\
+SELECT
+    hmo.ide    AS ide,
+    hmo.reside AS reside,
+    hmo.ano    AS ano,
+    hmo.mes    AS mes
+FROM hmo
+WHERE hmo.obride = ?
 """
 
 
@@ -156,6 +200,72 @@ class SigridApiClient:
                 ObraRow(ide=ide, codigo=cod, nombre=_opt_str(rm.get("nombre")))
             )
         logger.info("%s obras -> %s filas", _LOG_PREFIX, len(out))
+        return out
+
+    def fetch_partidas_obra(self, obra_ide: int) -> list[PartidaRow]:
+        """Filas crudas de ``obrparpar`` de una obra (lineas y capitulos del
+        presupuesto). El arbol/clasificacion se hace en partida_catalog."""
+        columns, rows = self._post_sql_read(
+            sql=_SQL_PARTIDAS, parameters=[int(obra_ide)], label="partidas",
+        )
+        out: list[PartidaRow] = []
+        for row in rows:
+            rm = dict(zip(columns, row))
+            ide = _opt_int(rm.get("ide"))
+            if ide is None:
+                continue
+            out.append(PartidaRow(
+                ide=ide,
+                padide=_opt_int(rm.get("padide")),
+                cod=_opt_str(rm.get("cod")),
+                res=_opt_str(rm.get("res")),
+                tex=_opt_str(rm.get("tex")),
+                tipdes=_opt_int(rm.get("tipdes")) or 0,
+                cosindide=_opt_int(rm.get("cosindide")),
+                unimed=_opt_str(rm.get("unimed")),
+            ))
+        logger.info(
+            "%s partidas obra=%s -> %s filas", _LOG_PREFIX, obra_ide, len(out)
+        )
+        return out
+
+    def fetch_recursos(self) -> list[RecursoRow]:
+        """Maestro de recursos (``res``): ide, cif (DNI/NIF), conide
+        (empleado asociado). Para resolver el recurso por DNI/empleado."""
+        columns, rows = self._post_sql_read(
+            sql=_SQL_RECURSOS, parameters=[], label="recursos",
+        )
+        out: list[RecursoRow] = []
+        for row in rows:
+            rm = dict(zip(columns, row))
+            ide = _opt_int(rm.get("ide"))
+            if ide is None:
+                continue
+            out.append(RecursoRow(
+                ide=ide, cif=_opt_str(rm.get("cif")),
+                conide=_opt_int(rm.get("conide")),
+            ))
+        logger.info("%s recursos -> %s filas", _LOG_PREFIX, len(out))
+        return out
+
+    def fetch_hmo_obra(self, obra_ide: int) -> list[HmoRow]:
+        """Partes de trabajo (``hmo``) de una obra: ide + recurso + ano + mes."""
+        columns, rows = self._post_sql_read(
+            sql=_SQL_HMO_OBRA, parameters=[int(obra_ide)], label="hmo",
+        )
+        out: list[HmoRow] = []
+        for row in rows:
+            rm = dict(zip(columns, row))
+            ide = _opt_int(rm.get("ide"))
+            if ide is None:
+                continue
+            out.append(HmoRow(
+                ide=ide, reside=_opt_int(rm.get("reside")),
+                ano=_opt_int(rm.get("ano")), mes=_opt_int(rm.get("mes")),
+            ))
+        logger.info(
+            "%s hmo obra=%s -> %s filas", _LOG_PREFIX, obra_ide, len(out)
+        )
         return out
 
     def fetch_tipos_hora(self) -> list[TipoHoraRow]:

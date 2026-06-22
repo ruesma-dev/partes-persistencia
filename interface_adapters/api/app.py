@@ -25,6 +25,8 @@ from application.pipelines.persist_parte_pipeline import (
     PersistParteRequest,
 )
 from application.services.parte_normalizer import ParteNormalizer
+from application.services.partida_conciliador import PartidaConciliador
+from application.services.recurso_conciliador import RecursoConciliador
 from application.services.sigrid_matcher_provider import SigridMatcherProvider
 from config.settings import Settings
 from infrastructure.database.session_factory import SessionFactory
@@ -52,6 +54,9 @@ def build_app(settings: Settings) -> FastAPI:
     # Sigrid (casado). Solo si hay credenciales.
     # ----------------------------------------------------------- #
     matcher_provider: SigridMatcherProvider | None = None
+    partida_conciliador: PartidaConciliador | None = None
+    recurso_conciliador: RecursoConciliador | None = None
+    sigrid_client: SigridApiClient | None = None
     if settings.sigrid_credentials_present:
         sigrid_client = SigridApiClient(
             base_url=settings.sigrid_api_base_url,        # type: ignore[arg-type]
@@ -67,6 +72,18 @@ def build_app(settings: Settings) -> FastAPI:
             obra_min_score=settings.obra_min_score,
             default_hora_normal_cod=settings.default_hora_normal_cod,
             default_hora_extra_cod=settings.default_hora_extra_cod,
+        )
+        # Conciliacion de partidas: usa el mismo cliente Sigrid (lee obrparpar
+        # por obra) y el repositorio (lee registros / escribe el casado).
+        partida_conciliador = PartidaConciliador(
+            repository=repository,
+            lookup=sigrid_client,
+        )
+        # Conciliacion de recurso/parte de trabajo (mismo cliente Sigrid:
+        # lee res + hmo por obra; el repositorio lee/escribe el casado).
+        recurso_conciliador = RecursoConciliador(
+            repository=repository,
+            lookup=sigrid_client,
         )
         logger.info(
             "[svc3][wiring] Sigrid CABLEADO base_url=%s db=%s empresa=%s",
@@ -117,6 +134,8 @@ def build_app(settings: Settings) -> FastAPI:
         ),
         matcher_provider=matcher_provider,
         sharepoint_uploader=sharepoint_uploader,
+        partida_conciliador=partida_conciliador,
+        recurso_conciliador=recurso_conciliador,
     )
 
     # ----------------------------------------------------------- #
@@ -135,6 +154,84 @@ def build_app(settings: Settings) -> FastAPI:
             "version": settings.service_version,
             "database": settings.pg_db,
             "sigrid_wired": settings.sigrid_credentials_present,
+        }
+
+    @app.get("/diag/sharepoint")
+    def diag_sharepoint() -> Dict[str, Any]:
+        """Diagnostico del archivado en SharePoint: si esta activado, si el
+        uploader esta cableado, y una prueba EN VIVO contra Graph que
+        devuelve el error concreto (auth / drive inexistente / sin permiso).
+        """
+        info: Dict[str, Any] = {
+            "enabled": settings.sharepoint_enabled,
+            "uploader_wired": sharepoint_uploader is not None,
+            "mode": settings.sharepoint_mode,
+            "folder_root": settings.sharepoint_folder_root,
+            "has_graph_key": bool((settings.graph_key or "").strip()),
+            "has_drive_id": bool((settings.sharepoint_drive_id or "").strip()),
+            "has_folder_url": bool((settings.sharepoint_folder_url or "").strip()),
+            "has_site_path": bool(
+                (settings.sharepoint_hostname or "").strip()
+                and (settings.sharepoint_site_path or "").strip()
+            ),
+        }
+        if sharepoint_uploader is None:
+            info["probe"] = {
+                "ok": False,
+                "reason": "uploader NO cableado: sharepoint_enabled es False "
+                          "(falta GRAPH_KEY o la config del modo).",
+            }
+            return info
+        try:
+            info["probe"] = {"ok": True, **sharepoint_uploader.probe()}
+        except Exception as exc:  # noqa: BLE001
+            info["probe"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return info
+
+    @app.get("/diag/partidas/{obra_ide}")
+    def diag_partidas(obra_ide: int) -> Dict[str, Any]:
+        """Diagnostico del casado de partidas de una obra: lee ``obrparpar``
+        en vivo, construye el arbol y muestra el conteo de hojas por capitulo
+        (CD/CI/CP/OTRO) y las partidas hoja de CI/CD, para ver por que casa o
+        no (p.ej. si CI sale 0, el problema es la clasificacion/los datos)."""
+        if sigrid_client is None:
+            return {"ok": False, "error": "Sigrid no cableado (faltan SIGRID_API_*)."}
+        from application.services.partida_catalog import (
+            build_arbol_partidas,
+            partidas_hoja,
+        )
+        try:
+            filas = sigrid_client.fetch_partidas_obra(obra_ide)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False, "obra_ide": obra_ide,
+                "error": f"fetch_partidas_obra fallo: {exc!r}",
+            }
+        nodos = build_arbol_partidas(filas)
+        por_cat: Dict[str, int] = {}
+        for n in nodos.values():
+            if n.es_hoja and n.activa:
+                por_cat[n.categoria] = por_cat.get(n.categoria, 0) + 1
+
+        def _muestra(lst):
+            return [
+                {"cod": n.cod, "res": n.res, "ruta": n.ruta_capitulos}
+                for n in lst[:40]
+            ]
+
+        return {
+            "ok": True,
+            "obra_ide": obra_ide,
+            "obrparpar_filas": len(filas),
+            "nodos": len(nodos),
+            "hojas_activas_por_categoria": por_cat,
+            "ci_hojas": _muestra(partidas_hoja(nodos, categoria="CI")),
+            "cd_hojas_muestra": _muestra(partidas_hoja(nodos, categoria="CD")),
+            # primeras filas crudas para inspeccionar codigos/descripciones
+            "raw_muestra": [
+                {"ide": f.ide, "padide": f.padide, "cod": f.cod, "res": f.res}
+                for f in filas[:25]
+            ],
         }
 
     @app.post("/v1/partes/persist")

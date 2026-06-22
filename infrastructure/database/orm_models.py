@@ -168,6 +168,27 @@ class ParteRegistroOrm(Base):
     horas: Mapped[float | None] = mapped_column(Float)
     partida: Mapped[str | None] = mapped_column(String(128))
 
+    # --- PARTIDA CASADA contra el presupuesto (Sigrid obrparpar) --- #
+    # La escribe la conciliacion automatica de sv3 al persistir (no el front).
+    # partida_ide/cod/res identifican la partida; partida_capitulo es CD/CI/CP
+    # del capitulo raiz; metodo: auto_nombre|auto_categoria|manual|sin.
+    partida_ide: Mapped[int | None] = mapped_column(Integer)
+    partida_cod: Mapped[str | None] = mapped_column(String(64))
+    partida_res: Mapped[str | None] = mapped_column(String(255))
+    partida_capitulo: Mapped[str | None] = mapped_column(String(8))
+    partida_match_method: Mapped[str | None] = mapped_column(String(24))
+    partida_match_score: Mapped[float | None] = mapped_column(Float)
+
+    # --- RECURSO / PARTE DE TRABAJO casado (Sigrid res + hmo) --- #
+    # Lo escribe la conciliacion automatica de sv3. recurso_ide = res.ide
+    # (recurso del trabajador, via emp.reside o por DNI); recurso_cif = DNI;
+    # hmo_ide = parte de trabajo localizado (reside+obra+ano+mes) o NULL;
+    # parte_estado: ok | sin_recurso | sin_parte.
+    recurso_ide: Mapped[int | None] = mapped_column(Integer)
+    recurso_cif: Mapped[str | None] = mapped_column(String(64))
+    hmo_ide: Mapped[int | None] = mapped_column(Integer)
+    parte_estado: Mapped[str | None] = mapped_column(String(16))
+
     # --- CODIGO DE HORA resuelto (Sigrid auxhor) --- #
     hora_ide: Mapped[int | None] = mapped_column(Integer)
     hora_codigo: Mapped[str | None] = mapped_column(String(64))

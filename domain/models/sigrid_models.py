@@ -44,3 +44,44 @@ class TipoHoraRow:
     ext: int                 # 0 normal | 1 extra
     pre: float | None        # precio coste
     prenom: float | None     # precio nomina
+
+
+@dataclass(frozen=True)
+class PartidaRow:
+    """Fila cruda de ``obrparpar`` (linea/capitulo del presupuesto de obra).
+
+    ``padide`` es el capitulo padre (raices ``padide=0``); el arbol y la
+    clasificacion CD/CI/CP (por capitulo raiz) y la deteccion de hoja se
+    hacen en ``application/services/partida_catalog.py``.
+    """
+
+    ide: int
+    padide: int | None
+    cod: str | None
+    res: str | None
+    tex: str | None
+    tipdes: int
+    cosindide: int | None
+    unimed: str | None
+
+
+@dataclass(frozen=True)
+class RecursoRow:
+    """Recurso de Sigrid (``res`` extiende ``con``). ``cif`` es el DNI/NIF;
+    ``conide`` es el empleado asociado (``emp``). Es lo que referencian
+    ``hmo.reside`` / ``emp.reside`` al imputar mano de obra."""
+
+    ide: int
+    cif: str | None          # res.cif (DNI/NIF)
+    conide: int | None       # res.conide (empleado asociado)
+
+
+@dataclass(frozen=True)
+class HmoRow:
+    """Parte de trabajo de Sigrid (``hmo``). Se keyea por recurso + obra +
+    ano + mes; las horas del dia estan en ``hmomed`` (no se leen aqui)."""
+
+    ide: int
+    reside: int | None       # recurso
+    ano: int | None
+    mes: int | None

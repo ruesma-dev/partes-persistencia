@@ -39,6 +39,26 @@ _DDL_ALTERS = (
     "sharepoint_item_id VARCHAR(255)",
     "ALTER TABLE parte_documents ADD COLUMN IF NOT EXISTS "
     "sharepoint_drive_id VARCHAR(255)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_ide INTEGER",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_cod VARCHAR(64)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_res VARCHAR(255)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_capitulo VARCHAR(8)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_match_method VARCHAR(24)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "partida_match_score DOUBLE PRECISION",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "recurso_ide INTEGER",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "recurso_cif VARCHAR(64)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "hmo_ide INTEGER",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "parte_estado VARCHAR(16)",
 )
 
 
@@ -54,6 +74,121 @@ class SqlAlchemyParteRepository:
             for ddl in _DDL_ALTERS:
                 connection.execute(text(ddl))
         logger.info("[parte-repo] esquema inicializado.")
+
+    # ----------------------------------------------------------------- #
+    # Conciliacion de PARTIDAS (la lanza sv3 al persistir; sv4 solo lee).
+    # ----------------------------------------------------------------- #
+    def fetch_registros_para_partida(self) -> list[dict]:
+        """Registros de partes ACTIVOS con su obra/categoria/nombre, para
+        casarlos contra las partidas del presupuesto. Devuelve dicts ligeros
+        (no ORM, para no arrastrar sesiones)."""
+        with self._session_factory.create_session() as session:
+            stmt = (
+                select(
+                    ParteRegistroOrm.id,
+                    ParteRegistroOrm.obra_ide,
+                    ParteRegistroOrm.categoria,
+                    ParteRegistroOrm.empleado_nombre,
+                    ParteRegistroOrm.trabajador_nombre_leido,
+                    ParteRegistroOrm.partida_match_method,
+                )
+                .join(
+                    ParteDocumentOrm,
+                    ParteRegistroOrm.document_id == ParteDocumentOrm.id,
+                )
+                .where(ParteDocumentOrm.is_active.is_(True))
+            )
+            out: list[dict] = []
+            for rid, obra_ide, cat, emp_nom, leido, metodo in session.execute(
+                stmt
+            ).all():
+                out.append({
+                    "registro_id": rid,
+                    "obra_ide": obra_ide,
+                    "categoria": cat,
+                    "nombre": emp_nom or leido,
+                    "partida_match_method": metodo,
+                })
+            return out
+
+    def apply_partida_matches(self, updates: list[dict]) -> int:
+        """Escribe el casado de partida por registro. Cada update:
+        {registro_id, partida_ide, partida_cod, partida_res,
+         partida_capitulo, partida_match_method, partida_match_score}.
+        Devuelve el nº de registros actualizados."""
+        if not updates:
+            return 0
+        n = 0
+        with self._session_factory.create_session() as session:
+            for u in updates:
+                reg = session.get(ParteRegistroOrm, u.get("registro_id"))
+                if reg is None:
+                    continue
+                reg.partida_ide = u.get("partida_ide")
+                reg.partida_cod = u.get("partida_cod")
+                reg.partida_res = u.get("partida_res")
+                reg.partida_capitulo = u.get("partida_capitulo")
+                reg.partida_match_method = u.get("partida_match_method")
+                reg.partida_match_score = u.get("partida_match_score")
+                n += 1
+            session.commit()
+        return n
+
+    # ----------------------------------------------------------------- #
+    # Conciliacion de RECURSO / parte de trabajo (Sigrid res + hmo).
+    # ----------------------------------------------------------------- #
+    def fetch_registros_para_recurso(self) -> list[dict]:
+        """Registros de partes ACTIVOS con lo necesario para localizar el
+        recurso y su parte de trabajo: empleado conciliado (ide/reside/dni),
+        obra y fecha."""
+        with self._session_factory.create_session() as session:
+            stmt = (
+                select(
+                    ParteRegistroOrm.id,
+                    ParteRegistroOrm.obra_ide,
+                    ParteRegistroOrm.empleado_ide,
+                    ParteRegistroOrm.empleado_reside,
+                    ParteRegistroOrm.empleado_dni,
+                    ParteRegistroOrm.fecha_int,
+                )
+                .join(
+                    ParteDocumentOrm,
+                    ParteRegistroOrm.document_id == ParteDocumentOrm.id,
+                )
+                .where(ParteDocumentOrm.is_active.is_(True))
+            )
+            out: list[dict] = []
+            for rid, obra_ide, emp_ide, reside, dni, fint in session.execute(
+                stmt
+            ).all():
+                out.append({
+                    "registro_id": rid,
+                    "obra_ide": obra_ide,
+                    "empleado_ide": emp_ide,
+                    "empleado_reside": reside,
+                    "empleado_dni": dni,
+                    "fecha_int": fint,
+                })
+            return out
+
+    def apply_recurso_matches(self, updates: list[dict]) -> int:
+        """Escribe el casado de recurso/parte por registro. Cada update:
+        {registro_id, recurso_ide, recurso_cif, hmo_ide, parte_estado}."""
+        if not updates:
+            return 0
+        n = 0
+        with self._session_factory.create_session() as session:
+            for u in updates:
+                reg = session.get(ParteRegistroOrm, u.get("registro_id"))
+                if reg is None:
+                    continue
+                reg.recurso_ide = u.get("recurso_ide")
+                reg.recurso_cif = u.get("recurso_cif")
+                reg.hmo_ide = u.get("hmo_ide")
+                reg.parte_estado = u.get("parte_estado")
+                n += 1
+            session.commit()
+        return n
 
     def find_empleado_alias(self, nombre_leido: str | None) -> dict | None:
         """Busca un alias aprendido (nombre LEIDO -> empleado). Devuelve los

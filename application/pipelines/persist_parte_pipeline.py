@@ -46,6 +46,8 @@ class PersistPartePipeline:
         normalizer: ParteNormalizer,
         matcher_provider: Optional[SigridMatcherProvider],
         sharepoint_uploader: Any = None,
+        partida_conciliador: Any = None,
+        recurso_conciliador: Any = None,
     ) -> None:
         self._repository = repository
         self._normalizer = normalizer
@@ -53,6 +55,10 @@ class PersistPartePipeline:
         # Uploader best-effort (duck-typing: .upload_parte_pdf). Si es None o
         # falla, el parte se guarda igual sin URL de SharePoint.
         self._sharepoint = sharepoint_uploader
+        # Conciliadores best-effort (tras guardar, recasan TODOS los partes):
+        # partidas (presupuesto) y recurso/parte de trabajo. Si None, se omiten.
+        self._partida_conciliador = partida_conciliador
+        self._recurso_conciliador = recurso_conciliador
 
     def run(self, request: PersistParteRequest) -> PersistParteResult:
         envelope = request.extraction_envelope or {}
@@ -123,6 +129,10 @@ class PersistPartePipeline:
             review_required=review_required,
         )
 
+        # ---- Conciliacion automatica (todos los partes): partida + recurso ----
+        self._conciliar_partidas_safely()
+        self._conciliar_recursos_safely()
+
         empleados = {
             r.empleado.ide or r.trabajador_nombre_leido
             for r in parte.registros
@@ -141,6 +151,36 @@ class PersistPartePipeline:
             registros_con_hora=registros_con_hora,
             firmado=parte.firmado,
         )
+
+    # ----------------------------------------------------------------- #
+    def _conciliar_partidas_safely(self) -> None:
+        """Lanza la conciliacion de partidas sobre TODOS los partes activos.
+        Best-effort: nunca rompe la persistencia del parte."""
+        if self._partida_conciliador is None:
+            return
+        try:
+            res = self._partida_conciliador.conciliar_todos()
+            logger.info("[persist-parte] conciliacion de partidas: %s", res)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[persist-parte] conciliacion de partidas fallo "
+                "(no bloquea el guardado): %r", exc
+            )
+
+    # ----------------------------------------------------------------- #
+    def _conciliar_recursos_safely(self) -> None:
+        """Lanza la conciliacion de recurso/parte sobre TODOS los partes
+        activos. Best-effort: nunca rompe la persistencia."""
+        if self._recurso_conciliador is None:
+            return
+        try:
+            res = self._recurso_conciliador.conciliar_todos()
+            logger.info("[persist-parte] conciliacion de recurso: %s", res)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[persist-parte] conciliacion de recurso fallo "
+                "(no bloquea el guardado): %r", exc
+            )
 
     # ----------------------------------------------------------------- #
     def _archive_to_sharepoint(
