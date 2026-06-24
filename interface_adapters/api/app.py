@@ -145,6 +145,8 @@ def build_app(settings: Settings) -> FastAPI:
         title="Partes Persistence API",
         version=settings.service_version,
     )
+    # Expuesto para que el worker (main_worker.py) reutilice el mismo wiring.
+    app.state.pipeline = pipeline
 
     @app.get("/health")
     def health() -> Dict[str, Any]:
