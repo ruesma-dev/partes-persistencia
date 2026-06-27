@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Protocol
 
 from domain.models.sigrid_models import (
-    EmpleadoRow, HmoRow, ObraRow, PartidaRow, RecursoRow, TipoHoraRow,
+    EmpleadoRow, HmoRow, ObraRow, PartidaRow, RecursoRow, ReshorRow,
+    TipoHoraRow,
 )
 
 
@@ -24,6 +25,9 @@ class SigridLookupPort(Protocol):
         ...
 
     def fetch_recursos(self) -> list[RecursoRow]:
+        ...
+
+    def fetch_reshor(self) -> list[ReshorRow]:
         ...
 
     def fetch_hmo_obra(self, obra_ide: int) -> list[HmoRow]:

@@ -23,7 +23,8 @@ from typing import Any
 import httpx
 
 from domain.models.sigrid_models import (
-    EmpleadoRow, HmoRow, ObraRow, PartidaRow, RecursoRow, TipoHoraRow,
+    EmpleadoRow, HmoRow, ObraRow, PartidaRow, RecursoRow, ReshorRow,
+    TipoHoraRow,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,13 +96,38 @@ WHERE obrparpar.obride = ?
 
 
 # Recursos (res extiende con; ide = con.ide). cif = DNI/NIF; conide =
-# empleado asociado (emp). Maestro para resolver el recurso por DNI/empleado.
+# empleado asociado (emp). restipide -> auxrestip da la CLASIFICACION
+# (categoria: cod/res). horide = tipo de hora por defecto (hora laborable
+# ordinaria). Maestro para resolver el recurso y pisar categoria/hora.
 _SQL_RECURSOS = """\
 SELECT
-    res.ide    AS ide,
-    res.cif    AS cif,
-    res.conide AS conide
+    res.ide       AS ide,
+    res.cif       AS cif,
+    res.conide    AS conide,
+    res.restipide AS restipide,
+    auxrestip.cod AS restip_cod,
+    auxrestip.res AS restip_res,
+    res.horide    AS horide_def
 FROM res
+LEFT JOIN auxrestip ON auxrestip.ide = res.restipide
+"""
+
+# Costes de horas de los recursos (reshor x auxhor): por cada recurso y
+# tipo de hora, su codigo/descripcion, el flag extra y la cantidad por
+# defecto (candef = jornada por defecto en la hora laborable). Es la base
+# para pisar el codigo de hora del registro con el del recurso y guardar
+# el CanDefecto.
+_SQL_RESHOR = """\
+SELECT
+    reshor.reside AS reside,
+    reshor.horide AS horide,
+    auxhor.cod    AS cod,
+    auxhor.res    AS res,
+    auxhor.ext    AS ext,
+    reshor.candef AS candef,
+    reshor.pre    AS pre
+FROM reshor
+JOIN auxhor ON auxhor.ide = reshor.horide
 """
 
 # Partes de trabajo (hmo) de una obra: ide + recurso + ano + mes. Para
@@ -231,7 +257,8 @@ class SigridApiClient:
 
     def fetch_recursos(self) -> list[RecursoRow]:
         """Maestro de recursos (``res``): ide, cif (DNI/NIF), conide
-        (empleado asociado). Para resolver el recurso por DNI/empleado."""
+        (empleado asociado), su CLASIFICACION (restipide + cod/res de
+        ``auxrestip``) y su tipo de hora por defecto (``horide``)."""
         columns, rows = self._post_sql_read(
             sql=_SQL_RECURSOS, parameters=[], label="recursos",
         )
@@ -244,8 +271,36 @@ class SigridApiClient:
             out.append(RecursoRow(
                 ide=ide, cif=_opt_str(rm.get("cif")),
                 conide=_opt_int(rm.get("conide")),
+                restipide=_opt_int(rm.get("restipide")),
+                restip_cod=_opt_str(rm.get("restip_cod")),
+                restip_res=_opt_str(rm.get("restip_res")),
+                horide_def=_opt_int(rm.get("horide_def")),
             ))
         logger.info("%s recursos -> %s filas", _LOG_PREFIX, len(out))
+        return out
+
+    def fetch_reshor(self) -> list[ReshorRow]:
+        """Costes de horas de los recursos (``reshor`` x ``auxhor``): por
+        cada (recurso, tipo de hora) su codigo/descripcion, flag extra,
+        cantidad por defecto (``candef``) y precio coste."""
+        columns, rows = self._post_sql_read(
+            sql=_SQL_RESHOR, parameters=[], label="reshor",
+        )
+        out: list[ReshorRow] = []
+        for row in rows:
+            rm = dict(zip(columns, row))
+            reside = _opt_int(rm.get("reside"))
+            horide = _opt_int(rm.get("horide"))
+            if reside is None or horide is None:
+                continue
+            out.append(ReshorRow(
+                reside=reside, horide=horide,
+                cod=_opt_str(rm.get("cod")), res=_opt_str(rm.get("res")),
+                ext=_opt_int(rm.get("ext")) or 0,
+                candef=_opt_float(rm.get("candef")),
+                pre=_opt_float(rm.get("pre")),
+            ))
+        logger.info("%s reshor -> %s filas", _LOG_PREFIX, len(out))
         return out
 
     def fetch_hmo_obra(self, obra_ide: int) -> list[HmoRow]:

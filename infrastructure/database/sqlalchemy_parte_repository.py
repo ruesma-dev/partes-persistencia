@@ -59,6 +59,8 @@ _DDL_ALTERS = (
     "hmo_ide INTEGER",
     "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
     "parte_estado VARCHAR(16)",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "hora_candef DOUBLE PRECISION",
 )
 
 
@@ -139,8 +141,9 @@ class SqlAlchemyParteRepository:
     # ----------------------------------------------------------------- #
     def fetch_registros_para_recurso(self) -> list[dict]:
         """Registros de partes ACTIVOS con lo necesario para localizar el
-        recurso y su parte de trabajo: empleado conciliado (ide/reside/dni),
-        obra y fecha."""
+        recurso y su parte de trabajo (empleado conciliado, obra y fecha) y
+        para que el recurso pise categoria/hora: el tipo de hora de la linea
+        y el codigo de hora/categoria ya resueltos (para detectar cambios)."""
         with self._session_factory.create_session() as session:
             stmt = (
                 select(
@@ -150,6 +153,10 @@ class SqlAlchemyParteRepository:
                     ParteRegistroOrm.empleado_reside,
                     ParteRegistroOrm.empleado_dni,
                     ParteRegistroOrm.fecha_int,
+                    ParteRegistroOrm.tipo_hora,
+                    ParteRegistroOrm.hora_ide,
+                    ParteRegistroOrm.hora_codigo,
+                    ParteRegistroOrm.categoria,
                 )
                 .join(
                     ParteDocumentOrm,
@@ -158,7 +165,8 @@ class SqlAlchemyParteRepository:
                 .where(ParteDocumentOrm.is_active.is_(True))
             )
             out: list[dict] = []
-            for rid, obra_ide, emp_ide, reside, dni, fint in session.execute(
+            for (rid, obra_ide, emp_ide, reside, dni, fint, tipo_hora,
+                 hora_ide, hora_codigo, categoria) in session.execute(
                 stmt
             ).all():
                 out.append({
@@ -168,14 +176,26 @@ class SqlAlchemyParteRepository:
                     "empleado_reside": reside,
                     "empleado_dni": dni,
                     "fecha_int": fint,
+                    "tipo_hora": tipo_hora,
+                    "hora_ide": hora_ide,
+                    "hora_codigo": hora_codigo,
+                    "categoria": categoria,
                 })
             return out
 
     def apply_recurso_matches(self, updates: list[dict]) -> int:
-        """Escribe el casado de recurso/parte por registro. Cada update:
-        {registro_id, recurso_ide, recurso_cif, hmo_ide, parte_estado}."""
+        """Escribe el casado de recurso/parte por registro. Claves base:
+        {registro_id, recurso_ide, recurso_cif, hmo_ide, parte_estado}.
+        Si el recurso pisa categoria/hora, vienen ademas (solo entonces, para
+        no borrar lo resuelto en lineas sin recurso o incidencias):
+        categoria, hora_ide, hora_codigo, hora_descripcion, hora_ext,
+        hora_candef, hora_match_method."""
         if not updates:
             return 0
+        _PISA = (
+            "categoria", "hora_ide", "hora_codigo", "hora_descripcion",
+            "hora_ext", "hora_candef", "hora_match_method",
+        )
         n = 0
         with self._session_factory.create_session() as session:
             for u in updates:
@@ -186,6 +206,9 @@ class SqlAlchemyParteRepository:
                 reg.recurso_cif = u.get("recurso_cif")
                 reg.hmo_ide = u.get("hmo_ide")
                 reg.parte_estado = u.get("parte_estado")
+                for k in _PISA:
+                    if k in u:
+                        setattr(reg, k, u[k])
                 n += 1
             session.commit()
         return n

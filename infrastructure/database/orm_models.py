@@ -196,6 +196,10 @@ class ParteRegistroOrm(Base):
     hora_ext: Mapped[int | None] = mapped_column(Integer)   # 0 normal|1 extra
     hora_precio_coste: Mapped[float | None] = mapped_column(Float)
     hora_precio_nomina: Mapped[float | None] = mapped_column(Float)
+    # Cantidad por defecto (CanDefecto) de la hora laborable del recurso =
+    # jornada por defecto. La escribe la conciliacion de recurso (sv3) al
+    # casar; sirve para contabilizar las horas extra.
+    hora_candef: Mapped[float | None] = mapped_column(Float)
     hora_match_method: Mapped[str | None] = mapped_column(String(24))
 
     confianza_pct: Mapped[float | None] = mapped_column(Float)
