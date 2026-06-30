@@ -29,6 +29,9 @@ from application.services.partida_conciliador import PartidaConciliador
 from application.services.recurso_conciliador import RecursoConciliador
 from application.services.sigrid_matcher_provider import SigridMatcherProvider
 from config.settings import Settings
+from infrastructure.calendario.json_calendario_laboral import (
+    JsonCalendarioLaboral,
+)
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.database.sqlalchemy_parte_repository import (
     SqlAlchemyParteRepository,
@@ -84,6 +87,10 @@ def build_app(settings: Settings) -> FastAPI:
         recurso_conciliador = RecursoConciliador(
             repository=repository,
             lookup=sigrid_client,
+            calendario=JsonCalendarioLaboral(
+                path=settings.calendario_laboral_path
+            ),
+            jornada_ordinaria_horas=settings.jornada_ordinaria_horas,
         )
         logger.info(
             "[svc3][wiring] Sigrid CABLEADO base_url=%s db=%s empresa=%s",
@@ -157,6 +164,23 @@ def build_app(settings: Settings) -> FastAPI:
             "database": settings.pg_db,
             "sigrid_wired": settings.sigrid_credentials_present,
         }
+
+    @app.post("/admin/reconciliar-recursos")
+    def reconciliar_recursos() -> Dict[str, Any]:
+        """Re-dispara la conciliacion de recurso/parte sobre TODOS los
+        partes activos: revierte los extra-auto previos y recalcula el
+        reparto ordinarias/extra aplicando fin de semana y festivos. Util
+        para aplicar cambios de calendario sin reprocesar el lote."""
+        if recurso_conciliador is None:
+            return {
+                "ok": False,
+                "error": "Sigrid no cableado (faltan SIGRID_API_*).",
+            }
+        try:
+            res = recurso_conciliador.conciliar_todos()
+            return {"ok": True, **res}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     @app.get("/diag/sharepoint")
     def diag_sharepoint() -> Dict[str, Any]:

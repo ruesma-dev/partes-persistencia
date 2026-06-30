@@ -6,12 +6,13 @@ ACTIVOS, los agrupa por obra, lee las partidas del presupuesto de cada obra
 (``obrparpar`` via ``sigrid-api``, cacheadas con TTL), y casa cada linea con
 la PARTIDA segun la categoria del trabajador y, si aparece, su nombre.
 
-Ambito de busqueda por categoria:
-- Mando/indirectos (encargado, capataz, gruista, jefe...) -> capitulo CI.
-- Oficiales/peones (varia) y desconocidos -> CI + CD.
+La partida NUNCA viene indicada en el parte: la eleccion es SIEMPRE
+automatica (categoria/nombre del trabajador contra el presupuesto). Por
+decision de negocio, esa eleccion automatica busca SOLO en el capitulo CI
+(costes indirectos); si no casa en CI, la linea queda en blanco.
 
 Reglas:
-- Si no hay candidata por encima del umbral -> ``metodo='sin'`` (en blanco).
+- Solo se buscan candidatas en CI. Si nada casa -> ``metodo='sin'`` (blanco).
 - Se PRESERVAN los casados manuales (``metodo='manual'``): no se tocan.
 - Best-effort: si Sigrid falla para una obra, esos registros NO se tocan
   (se reintentan en la siguiente persistencia); nunca rompe el persist.
@@ -30,7 +31,6 @@ from application.services.partida_catalog import (
 )
 from application.services.partida_matcher import (
     UMBRAL_ROL,
-    ambito_categoria,
     match_partida,
 )
 
@@ -107,10 +107,9 @@ class PartidaConciliador:
             if cat is None:
                 continue  # Sigrid fallo: no tocar, se reintenta luego
             for r in regs:
-                amb = ambito_categoria(r.get("categoria"))
+                # Eleccion automatica: SOLO capitulo CI. Si no casa en CI, la
+                # linea queda en blanco (no se cae a CD).
                 candidatas = list(cat["CI"])
-                if "CD" in amb:
-                    candidatas = candidatas + list(cat["CD"])
                 m = match_partida(
                     r.get("categoria"), r.get("nombre"), candidatas,
                     umbral=self._umbral,

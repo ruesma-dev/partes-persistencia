@@ -171,15 +171,13 @@ class ParteNormalizer:
                 confianza_pct=confianza,
             )
 
-            # Regla DETERMINISTA: si las horas ordinarias superan la jornada
-            # estandar, el exceso (de la jornada hasta el total) pasa a extra.
-            # El exceso usa el codigo de hora extra de la categoria.
+            # El split por jornada se hace ahora en sv3 tras la conciliacion
+            # de recurso (con el CanDefecto real del recurso y la vision del
+            # dia completo across obras). Aqui se respetan las horas tal cual:
+            # las ordinarias del parte como normal y las extra EXPLICITAS como
+            # extra. (self._jornada queda sin uso; ver recurso_conciliador.)
             ord_eff = horas_ord
             extra_eff = horas_extra
-            if horas_ord and horas_ord > self._jornada:
-                overflow = horas_ord - self._jornada
-                ord_eff = self._jornada
-                extra_eff = (horas_extra or 0.0) + overflow
 
             if ord_eff and ord_eff > 0:
                 parte.registros.append(

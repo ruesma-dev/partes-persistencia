@@ -18,12 +18,14 @@ registros NO se tocan (se reintentan en la siguiente persistencia).
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
 
 from application.services import text_match as tm
 from domain.models.sigrid_models import HmoRow, RecursoRow
+from domain.ports.calendario_laboral_port import CalendarioLaboralPort
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,26 @@ def _ano_mes(fecha_int: int | None) -> tuple[int | None, int | None]:
     if not fecha_int:
         return None, None
     return fecha_int // 10000, (fecha_int // 100) % 100
+
+
+_INCID_TIPOS = {"V", "B", "AT", "FJ", "F", "H", "M"}
+
+
+def _tipo_inc(res: str | None) -> str | None:
+    """Tipo de incidencia (V|B|AT|FJ|F|H|M) leido del parentesis final de la
+    descripcion de un codigo de hora, p.ej. 'Vacaciones(V)' -> 'V',
+    'Accidente/Enf. Profesional(AT)' -> 'AT'. None si no es una incidencia."""
+    if not res:
+        return None
+    m = re.search(r"\(([A-Za-z]{1,3})\)\s*$", res)
+    if not m:
+        return None
+    t = m.group(1).strip().upper()
+    return t if t in _INCID_TIPOS else None
+
+
+def _tipo(reg: dict) -> str:
+    return (reg.get("tipo_hora") or "").strip().lower()
 
 
 def _upd(registro_id, recurso_ide, recurso_cif, hmo_ide, estado) -> dict:
@@ -48,12 +70,21 @@ class RecursoConciliador:
         *,
         repository,
         lookup,
+        calendario: CalendarioLaboralPort | None = None,
+        jornada_ordinaria_horas: float = 8.0,
         ttl_seconds: int = 600,
     ) -> None:
         # repository: SqlAlchemyParteRepository. lookup: SigridLookupPort
         # (fetch_recursos, fetch_reshor, fetch_hmo_obra).
         self._repository = repository
         self._lookup = lookup
+        # Calendario laboral (fin de semana + festivos). Si es None, no
+        # se aplica la regla de no laborable (comportamiento anterior).
+        self._calendario = calendario
+        # Jornada ordinaria por defecto cuando el recurso no informa el
+        # CanDefecto (candef vacio): se resta esta cantidad y el resto va
+        # a extra.
+        self._jornada = float(jornada_ordinaria_horas)
         self._ttl = int(ttl_seconds)
         self._lock = threading.RLock()
         # maestro de recursos: maps conide->ide, cif_norm->ide, ide->RecursoRow
@@ -122,18 +153,50 @@ class RecursoConciliador:
         for reside, lst in por_reside.items():
             rec = by_ide.get(reside)
             horide_def = rec.horide_def if rec is not None else None
+            # Separar el grupo del recurso en INCIDENCIAS (por el (TIPO) de la
+            # descripcion) y horas de TRABAJO (el resto; los codigos de
+            # incidencia CIx que no mapean a un tipo de parte, p.ej. CIZ, se
+            # descartan).
+            incidencias: dict[str, object] = {}
+            trabajo: list = []
+            for f in lst:
+                t = _tipo_inc(f.res)
+                cod = (f.cod or "").upper()
+                if t:
+                    incidencias.setdefault(t, f)
+                elif cod.startswith("CI"):
+                    continue
+                else:
+                    trabajo.append(f)
+            # Ordinaria: hora por defecto del recurso; si falta, la primera
+            # no-extra; si no, la primera de trabajo.
             ordinaria = None
             if horide_def is not None:
                 ordinaria = next(
-                    (f for f in lst if f.horide == horide_def), None
+                    (f for f in trabajo if f.horide == horide_def), None
                 )
             if ordinaria is None:
-                ordinaria = next((f for f in lst if f.ext == 0), None)
-            extra = next((f for f in lst if f.ext == 1), None)
+                ordinaria = next((f for f in trabajo if f.ext == 0), None)
+            if ordinaria is None and trabajo:
+                ordinaria = trabajo[0]
+            # Extra: por el flag ext=1; si el flag no la marca (Sigrid no
+            # siempre lo informa), por la palabra "extra" en la descripcion;
+            # como ultimo recurso, la hora de trabajo distinta de la ordinaria.
+            extra = next((f for f in trabajo if f.ext == 1), None)
+            if extra is None:
+                extra = next(
+                    (f for f in trabajo
+                     if "extra" in tm.normalize(f.res or "")), None
+                )
+            if extra is None and ordinaria is not None:
+                extra = next(
+                    (f for f in trabajo if f.horide != ordinaria.horide), None
+                )
             idx[reside] = {
                 "ord": ordinaria,
                 "ext": extra,
                 "candef": ordinaria.candef if ordinaria is not None else None,
+                "incidencias": incidencias,
             }
         with self._lock:
             self._reshor_cache = (now, idx)
@@ -162,10 +225,16 @@ class RecursoConciliador:
             return out
         if hsel.get("candef") is not None:
             out["hora_candef"] = hsel["candef"]
+        ord_row = hsel.get("ord")
+        if ord_row is not None and ord_row.pre is not None:
+            out["recurso_precio_hora"] = ord_row.pre
         tipo = (reg.get("tipo_hora") or "").strip().lower()
         if tipo not in ("", "normal", "extra"):
-            return out  # incidencia (V|B|AT|...): no se pisa la hora (D2)
-        if tipo == "extra":
+            # Incidencia (V|B|AT|FJ|F|H|M): coge SU codigo del grupo del
+            # recurso (reshor), nunca la ordinaria. Si el recurso no tiene ese
+            # codigo de incidencia, no se pisa (se mantiene el resuelto).
+            hora = (hsel.get("incidencias") or {}).get(tipo.upper())
+        elif tipo == "extra":
             hora = hsel.get("ext") or hsel.get("ord")  # D3: sin extra -> normal
         else:
             hora = hsel.get("ord")
@@ -233,6 +302,11 @@ class RecursoConciliador:
         return None
 
     def conciliar_todos(self) -> dict:
+        # Idempotencia: revertir las extras por jornada de pasadas anteriores
+        # (restaurar horas originales y borrar los extra auto) para recalcular
+        # el dia completo desde el estado original del parte.
+        self._repository.revert_extras_auto()
+
         registros = self._repository.fetch_registros_para_recurso()
         by_conide, by_cif, by_ide = self._recurso_maps()
         reshor_idx = self._reshor_index(by_ide)
@@ -241,6 +315,7 @@ class RecursoConciliador:
         for r in registros:
             por_obra[r.get("obra_ide")].append(r)
 
+        ride_por_reg: dict[int, int] = {}
         updates: list[dict] = []
         con_parte = 0
         pisados = 0
@@ -254,6 +329,7 @@ class RecursoConciliador:
                     u = _upd(r["registro_id"], ride, r.get("empleado_dni"),
                              None, estado)
                     if ride:
+                        ride_por_reg[r["registro_id"]] = ride
                         ov = self._overwrite(r, ride, by_ide, reshor_idx)
                         if ov:
                             pisados += 1
@@ -271,6 +347,7 @@ class RecursoConciliador:
                              None, "sin_recurso")
                     )
                     continue
+                ride_por_reg[r["registro_id"]] = ride
                 ano, mes = _ano_mes(r.get("fecha_int"))
                 hmo_ide = idx.get((ride, ano, mes)) if ano and mes else None
                 if hmo_ide:
@@ -287,14 +364,135 @@ class RecursoConciliador:
                 updates.append(u)
 
         actualizados = self._repository.apply_recurso_matches(updates)
+
+        # Segunda pasada: pasar a extra el exceso de horas ORDINARIAS sobre el
+        # CanDefecto del recurso, por (recurso, dia) across obras.
+        splits = self._reclasificar_extras_jornada(
+            registros, ride_por_reg, reshor_idx
+        )
+        reclasificadas = self._repository.apply_extras_splits(splits)
         logger.info(
             "[recurso-concil] registros=%s actualizados=%s con_parte=%s "
-            "pisados=%s",
-            len(registros), actualizados, con_parte, pisados,
+            "pisados=%s extras_reclasificadas=%s",
+            len(registros), actualizados, con_parte, pisados, reclasificadas,
         )
         return {
             "registros": len(registros),
             "actualizados": actualizados,
             "con_parte": con_parte,
             "pisados": pisados,
+            "extras_reclasificadas": reclasificadas,
         }
+
+    # ----- exceso de jornada -> extra (por recurso y dia, across obras) ----- #
+    def _reclasificar_extras_jornada(
+        self,
+        registros: list[dict],
+        ride_por_reg: dict[int, int],
+        reshor_idx: dict[int, dict],
+    ) -> list[dict]:
+        """Por (recurso, dia) reuniendo TODAS las obras: si NO hay extra
+        EXPLICITA y la suma de horas ordinarias supera el CanDefecto del
+        recurso, pasa el exceso a extra empezando por los registros de mayor
+        id (ultimas obras creadas), partiendo el registro donde caiga el
+        corte. Solo calcula los 'splits'; la BD la toca el repositorio."""
+        grupos: dict[tuple[int, int | None], list[dict]] = defaultdict(list)
+        for r in registros:
+            ride = ride_por_reg.get(r["registro_id"])
+            if ride is None:
+                continue
+            grupos[(ride, r.get("fecha_int"))].append(r)
+
+        splits: list[dict] = []
+        for (ride, fecha_int), regs in grupos.items():
+            hsel = reshor_idx.get(ride)
+            if not hsel:
+                continue
+            hora_ext = hsel.get("ext")
+            if hora_ext is None:
+                continue  # sin hora extra del recurso: no se puede crear
+
+            if self._es_no_laborable(fecha_int, regs):
+                # Fin de semana / festivo: NO hay jornada ordinaria, TODO
+                # el trabajo pasa a extra (aunque ya haya extra explicita).
+                candef_efectivo = 0.0
+                logger.info(
+                    "[recurso-concil] dia NO laborable %s (recurso=%s): "
+                    "horas ordinarias -> extra.",
+                    self._fecha_int_to_iso(fecha_int), ride,
+                )
+            else:
+                # D-B: si ya hay extra EXPLICITA ese dia, respetar desglose.
+                if any(_tipo(x) == "extra" for x in regs):
+                    continue
+                candef = hsel.get("candef")
+                # Si el recurso no informa CanDefecto, jornada por defecto.
+                candef_efectivo = (
+                    float(candef) if candef is not None else self._jornada
+                )
+
+            ordinarios = [x for x in regs if _tipo(x) in ("", "normal")]
+            total = sum((x.get("horas") or 0.0) for x in ordinarios)
+            if total <= candef_efectivo + 1e-9:
+                continue
+            restante = total - candef_efectivo
+            # Las ultimas horas del dia (registros creados despues = id mayor).
+            for x in sorted(
+                ordinarios, key=lambda z: z["registro_id"], reverse=True
+            ):
+                if restante <= 1e-9:
+                    break
+                h = x.get("horas") or 0.0
+                if h <= 0:
+                    continue
+                porcion = h if h <= restante + 1e-9 else restante
+                splits.append({
+                    "normal_id": x["registro_id"],
+                    "horas_norm": round(h - porcion, 2),
+                    "horas_orig": h,
+                    "extra_horas": round(porcion, 2),
+                    "hora_ext_ide": hora_ext.horide,
+                    "hora_ext_cod": hora_ext.cod,
+                    "hora_ext_desc": hora_ext.res,
+                    "hora_ext_ext": hora_ext.ext,
+                    "hora_candef": candef_efectivo,
+                })
+                restante -= porcion
+        return splits
+
+    # ----- calendario laboral (fin de semana / festivos) ----- #
+    def _es_no_laborable(
+        self, fecha_int: int | None, regs: list[dict]
+    ) -> bool:
+        """True si el dia es fin de semana o festivo segun el calendario.
+        Sin calendario cableado o sin fecha valida, devuelve False."""
+        if self._calendario is None:
+            return False
+        iso = self._fecha_int_to_iso(fecha_int)
+        if iso is None:
+            return False
+        dni = next(
+            (r.get("empleado_dni") for r in regs if r.get("empleado_dni")),
+            None,
+        )
+        try:
+            return bool(self._calendario.es_no_laborable(iso, dni=dni))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[recurso-concil] calendario laboral fallo en %s: %r",
+                iso, exc,
+            )
+            return False
+
+    @staticmethod
+    def _fecha_int_to_iso(fecha_int: int | None) -> str | None:
+        try:
+            fi = int(fecha_int)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if fi <= 0:
+            return None
+        y, m, d = fi // 10000, (fi // 100) % 100, fi % 100
+        if not (1 <= m <= 12 and 1 <= d <= 31):
+            return None
+        return f"{y:04d}-{m:02d}-{d:02d}"

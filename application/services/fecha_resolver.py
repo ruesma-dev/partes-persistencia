@@ -18,6 +18,7 @@ Si no, se usa la fecha literal del parte (con el anio forzado a 2026+).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import re
 import unicodedata
@@ -25,7 +26,9 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MIN_YEAR = 2026
+# Suelo ABSOLUTO solo para datos corruptos (anios disparatados). El anio
+# real se confia de la IA si es plausible o se infiere respecto a hoy.
+DEFAULT_MIN_YEAR = 2000
 
 _MESES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
@@ -80,6 +83,9 @@ def _parse_dmy(raw: str | None) -> tuple[int | None, int | None, int | None]:
     if not raw:
         return (None, None, None)
     s = str(raw).strip()
+    # La IA a veces escribe la fecha con espacios alrededor de los
+    # separadores ("1 / 8 /2024"). Se quitan para que los patrones casen.
+    s = re.sub(r"\s*([/\-.])\s*", r"\1", s)
 
     m = _ISO_RE.search(s)
     if m:
@@ -137,40 +143,51 @@ class FechaParteResolver:
         *,
         raw_fecha: str | None,
         email_text: str | None = None,
+        today: "_dt.date | None" = None,
     ) -> FechaResuelta:
+        today = today or _dt.date.today()
         day, month, year = _parse_dmy(raw_fecha)
         em_month, em_year = parse_month_year_from_text(email_text)
 
-        # (A) El email nombra el mes: ese mes manda sobre la fecha leida, y se
-        # toma como MES NATURAL (abril = dia tal cual en abril), NO como
-        # periodo 16->15. El periodo 16->15 es solo para la vista del portal.
-        if em_month is not None and day is not None:
-            base_year = em_year or (
-                year if (year and year >= self._min_year) else self._min_year
+        # El DIA es lo mas fiable del parte. El MES: si el email lo nombra,
+        # manda (mes natural) sobre el leido; si no, el del parte.
+        eff_month = em_month or month
+        if day is None or eff_month is None:
+            logger.warning(
+                "[fecha-resolver] sin dia/mes raw=%r email_mes=%s",
+                raw_fecha, em_month,
             )
-            if base_year < self._min_year:
-                base_year = self._min_year
-            res = _build(base_year, em_month, day, "email_mes")
-            if res.iso:
-                logger.info(
-                    "[fecha-resolver] email mes natural=%s -> %s (dia=%s)",
-                    em_month, res.iso, day,
-                )
-                return res
+            return FechaResuelta(None, None, "none")
 
-        # (B) Fecha literal del parte, anio forzado a 2026+.
-        if day is not None and month is not None:
-            ry = year if year else (em_year or self._min_year)
-            method = "parte_fecha"
-            if ry < self._min_year:
-                ry = self._min_year
-                method = "parte_fecha_anio_corregido"
-            res = _build(ry, month, day, method)
-            if res.iso:
-                return res
+        # ANIO: se CONFIA en el leido (email o parte) si forma una fecha
+        # VALIDA y no es futuro respecto a hoy (un parte no puede ser del
+        # futuro). Solo si falta el anio, es futuro, o la fecha resultante es
+        # invalida (p.ej. 29/02 en anio no bisiesto), se infiere la ocurrencia
+        # mas reciente del mes: mes posterior al de hoy => anio anterior.
+        eff_year: int | None = None
+        method = "leido"
+        for cand in (em_year, year):
+            if (cand and self._min_year <= cand <= today.year
+                    and _valid(cand, eff_month, day)):
+                eff_year = cand
+                break
+        if eff_year is None:
+            eff_year = today.year if eff_month <= today.month else today.year - 1
+            method = "inferido"
+        if em_month is not None and em_month != month:
+            method = method + "+email_mes"
+
+        res = _build(eff_year, eff_month, day, method)
+        if res.iso:
+            logger.info(
+                "[fecha-resolver] %s (raw=%r email_mes=%s anio_leido=%s "
+                "method=%s)",
+                res.iso, raw_fecha, em_month, year, res.method,
+            )
+            return res
 
         logger.warning(
-            "[fecha-resolver] no se pudo resolver fecha raw=%r email_mes=%s",
-            raw_fecha, em_month,
+            "[fecha-resolver] fecha invalida d=%s m=%s y=%s raw=%r",
+            day, eff_month, eff_year, raw_fecha,
         )
         return FechaResuelta(None, None, "none")

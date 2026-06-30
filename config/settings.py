@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # verano (luego se podra hacer dependiente de la fecha).
     jornada_ordinaria_horas: float = Field(8.0, alias="JORNADA_ORDINARIA_HORAS")
 
+    # Calendario laboral (fin de semana + festivos). En fin de semana o
+    # festivo no hay horas ordinarias: el reparto las manda todas a extra.
+    # Hoy lo alimenta este JSON local; el dia de manana, Sesame.
+    calendario_laboral_path: str = Field(
+        "config/calendario_laboral.json", alias="CALENDARIO_LABORAL_PATH"
+    )
+
     # ------------------------------------------------------------ #
     # SharePoint (Microsoft Graph). Archiva el PDF del parte. Best-effort:
     # si falla la subida, el parte se guarda igual en PostgreSQL (sin URL).

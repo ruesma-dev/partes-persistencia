@@ -200,6 +200,20 @@ class ParteRegistroOrm(Base):
     # jornada por defecto. La escribe la conciliacion de recurso (sv3) al
     # casar; sirve para contabilizar las horas extra.
     hora_candef: Mapped[float | None] = mapped_column(Float)
+    # Precio/valor BASE de la hora laborable del recurso en Sigrid
+    # (reshor.pre de su hora por defecto). Lo escribe la conciliacion de
+    # recurso; es el coste hora asignado al trabajador.
+    recurso_precio_hora: Mapped[float | None] = mapped_column(Float)
+    # Horas ORIGINALES del registro normal antes de recortar parte del dia a
+    # extra (para poder revertir y recalcular de forma idempotente). NULL si
+    # el registro no ha sido recortado.
+    horas_orig: Mapped[float | None] = mapped_column(Float)
+    # Marca un registro EXTRA generado automaticamente por el calculo de
+    # exceso de jornada (no venia en el parte). Se borra y recrea en cada
+    # conciliacion. Los extra EXPLICITOS del parte tienen extra_auto=False.
+    extra_auto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     hora_match_method: Mapped[str | None] = mapped_column(String(24))
 
     confianza_pct: Mapped[float | None] = mapped_column(Float)

@@ -5,6 +5,7 @@ import threading
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -54,8 +55,15 @@ class SessionFactory:
                     return False
 
                 safe_db_name = self._target_database_name.replace('"', '""')
-                connection.execute(text(f'CREATE DATABASE "{safe_db_name}"'))
-                return True
+                try:
+                    connection.execute(
+                        text(f'CREATE DATABASE "{safe_db_name}"')
+                    )
+                    return True
+                except (ProgrammingError, IntegrityError):
+                    # Otra instancia (p.ej. el front) creo la base entre el
+                    # SELECT y el CREATE: ya existe, continuar.
+                    return False
         finally:
             admin_engine.dispose()
 

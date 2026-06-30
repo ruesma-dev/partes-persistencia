@@ -61,7 +61,39 @@ _DDL_ALTERS = (
     "parte_estado VARCHAR(16)",
     "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
     "hora_candef DOUBLE PRECISION",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "recurso_precio_hora DOUBLE PRECISION",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "horas_orig DOUBLE PRECISION",
+    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
+    "extra_auto BOOLEAN NOT NULL DEFAULT false",
 )
+
+
+def _norm_txt(s: str | None) -> str:
+    return " ".join((s or "").strip().lower().split())
+
+
+def _norm_dni(s: str | None) -> str:
+    return "".join(ch for ch in (s or "").upper() if ch.isalnum())
+
+
+def _emp_signals(
+    ide, dni, nombre_leido, nombre_emp
+) -> set:
+    """Senales que identifican a un trabajador: ide casado, DNI normalizado
+    y/o nombre normalizado. Dos partes 'son del mismo trabajador' si comparten
+    alguna senal."""
+    sig: set = set()
+    if ide is not None:
+        sig.add(("ide", int(ide)))
+    d = _norm_dni(dni)
+    if d:
+        sig.add(("dni", d))
+    n = _norm_txt(nombre_leido) or _norm_txt(nombre_emp)
+    if n:
+        sig.add(("nom", n))
+    return sig
 
 
 class SqlAlchemyParteRepository:
@@ -157,6 +189,7 @@ class SqlAlchemyParteRepository:
                     ParteRegistroOrm.hora_ide,
                     ParteRegistroOrm.hora_codigo,
                     ParteRegistroOrm.categoria,
+                    ParteRegistroOrm.horas,
                 )
                 .join(
                     ParteDocumentOrm,
@@ -166,7 +199,7 @@ class SqlAlchemyParteRepository:
             )
             out: list[dict] = []
             for (rid, obra_ide, emp_ide, reside, dni, fint, tipo_hora,
-                 hora_ide, hora_codigo, categoria) in session.execute(
+                 hora_ide, hora_codigo, categoria, horas) in session.execute(
                 stmt
             ).all():
                 out.append({
@@ -180,8 +213,98 @@ class SqlAlchemyParteRepository:
                     "hora_ide": hora_ide,
                     "hora_codigo": hora_codigo,
                     "categoria": categoria,
+                    "horas": horas,
                 })
             return out
+
+    # ----- extras por jornada (revert + split) ----- #
+    def revert_extras_auto(self) -> int:
+        """Deshace las extras por jornada de pasadas anteriores para poder
+        recalcular el dia desde el estado original del parte: borra los
+        registros extra_auto y restaura las horas originales de los normales
+        recortados. Idempotente."""
+        n = 0
+        with self._session_factory.create_session() as session:
+            autos = session.execute(
+                select(ParteRegistroOrm).where(
+                    ParteRegistroOrm.extra_auto.is_(True)
+                )
+            ).scalars().all()
+            for a in autos:
+                session.delete(a)
+                n += 1
+            recortados = session.execute(
+                select(ParteRegistroOrm).where(
+                    ParteRegistroOrm.horas_orig.isnot(None)
+                )
+            ).scalars().all()
+            for r in recortados:
+                r.horas = r.horas_orig
+                r.horas_orig = None
+            session.commit()
+        return n
+
+    def apply_extras_splits(self, splits: list[dict]) -> int:
+        """Aplica el paso de exceso de jornada a extra. Por cada split:
+        recorta el registro normal (horas -> horas_norm, guardando horas_orig)
+        e inserta un registro EXTRA (extra_auto) clonando el normal con la
+        hora extra del recurso. Devuelve el numero de registros extra creados."""
+        if not splits:
+            return 0
+        n = 0
+        with self._session_factory.create_session() as session:
+            for s in splits:
+                normal = session.get(ParteRegistroOrm, s["normal_id"])
+                if normal is None:
+                    continue
+                if normal.horas_orig is None:
+                    normal.horas_orig = s["horas_orig"]
+                normal.horas = s["horas_norm"]
+                extra = ParteRegistroOrm(
+                    document_id=normal.document_id,
+                    line_index=normal.line_index,
+                    empleado_line_no=normal.empleado_line_no,
+                    categoria=normal.categoria,
+                    trabajador_nombre_leido=normal.trabajador_nombre_leido,
+                    empleado_ide=normal.empleado_ide,
+                    empleado_codigo=normal.empleado_codigo,
+                    empleado_nombre=normal.empleado_nombre,
+                    empleado_dni=normal.empleado_dni,
+                    empleado_reside=normal.empleado_reside,
+                    empleado_match_score=normal.empleado_match_score,
+                    empleado_match_method=normal.empleado_match_method,
+                    fecha=normal.fecha,
+                    fecha_int=normal.fecha_int,
+                    obra_codigo=normal.obra_codigo,
+                    obra_nombre=normal.obra_nombre,
+                    obra_ide=normal.obra_ide,
+                    tipo_hora="extra",
+                    es_incidencia=False,
+                    horas=s["extra_horas"],
+                    partida=normal.partida,
+                    partida_ide=normal.partida_ide,
+                    partida_cod=normal.partida_cod,
+                    partida_res=normal.partida_res,
+                    partida_capitulo=normal.partida_capitulo,
+                    partida_match_method=normal.partida_match_method,
+                    partida_match_score=normal.partida_match_score,
+                    recurso_ide=normal.recurso_ide,
+                    recurso_cif=normal.recurso_cif,
+                    hmo_ide=normal.hmo_ide,
+                    parte_estado=normal.parte_estado,
+                    hora_ide=s["hora_ext_ide"],
+                    hora_codigo=s["hora_ext_cod"],
+                    hora_descripcion=s["hora_ext_desc"],
+                    hora_ext=s["hora_ext_ext"],
+                    hora_candef=s["hora_candef"],
+                    hora_match_method="extra_jornada",
+                    extra_auto=True,
+                    confianza_pct=normal.confianza_pct,
+                )
+                session.add(extra)
+                n += 1
+            session.commit()
+        return n
 
     def apply_recurso_matches(self, updates: list[dict]) -> int:
         """Escribe el casado de recurso/parte por registro. Claves base:
@@ -194,7 +317,8 @@ class SqlAlchemyParteRepository:
             return 0
         _PISA = (
             "categoria", "hora_ide", "hora_codigo", "hora_descripcion",
-            "hora_ext", "hora_candef", "hora_match_method",
+            "hora_ext", "hora_candef", "recurso_precio_hora",
+            "hora_match_method",
         )
         n = 0
         with self._session_factory.create_session() as session:
@@ -250,13 +374,15 @@ class SqlAlchemyParteRepository:
     def _deactivate_same_day_obra(
         self, session, parte: ParteDocumento, exclude_id: str
     ) -> list[str]:
-        """Desactiva (soft-delete) los partes ACTIVOS del MISMO dia y MISMA
-        obra. Asi un PDF distinto del mismo dia/obra 'pisa' lo anterior: las
-        vistas filtran por is_active, de modo que las horas viejas desaparecen.
+        """Desactiva (soft-delete) los partes ACTIVOS del MISMO dia, MISMA
+        obra y MISMO trabajador. Asi reenviar el parte de un trabajador (mismo
+        dia/obra) 'pisa' al anterior, pero los partes de OTROS trabajadores del
+        mismo dia/obra NO se tocan (cada pagina/PDF suele ser un trabajador).
 
         Identidad de obra: por codigo casado si lo hay; si no, por el numero
-        de obra leido (solo entre partes tambien sin casar). Si no hay fecha o
-        ningun identificador de obra, NO se desactiva nada (mas seguro)."""
+        de obra leido. Identidad de trabajador: ide casado, DNI o nombre.
+        Si no hay fecha, ni obra, ni trabajador identificable, NO se desactiva
+        nada (mas seguro)."""
         fint = parte.fecha_int
         if not fint or fint <= 0:
             return []
@@ -277,10 +403,27 @@ class SqlAlchemyParteRepository:
                 ParteDocumentOrm.obra_codigo.is_(None),
                 ParteDocumentOrm.obra_numero_leido == num,
             )
+        # Senales de los trabajadores del parte NUEVO.
+        nuevos: set = set()
+        for r in parte.registros:
+            emp = r.empleado
+            nuevos |= _emp_signals(
+                emp.ide, emp.dni, r.trabajador_nombre_leido, emp.nombre
+            )
+        if not nuevos:
+            return []  # parte sin trabajador identificable: no pisa nada
+
         ids: list[str] = []
         for old in session.execute(stmt).scalars().all():
-            old.is_active = False
-            ids.append(old.id)
+            viejos: set = set()
+            for oreg in old.registros:
+                viejos |= _emp_signals(
+                    oreg.empleado_ide, oreg.empleado_dni,
+                    oreg.trabajador_nombre_leido, oreg.empleado_nombre,
+                )
+            if nuevos & viejos:  # comparten trabajador -> es un reemplazo
+                old.is_active = False
+                ids.append(old.id)
         return ids
 
     def save_parte(
