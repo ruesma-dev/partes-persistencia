@@ -72,6 +72,7 @@ class RecursoConciliador:
         lookup,
         calendario: CalendarioLaboralPort | None = None,
         jornada_ordinaria_horas: float = 8.0,
+        candef_minimo: float = 2.0,
         ttl_seconds: int = 600,
     ) -> None:
         # repository: SqlAlchemyParteRepository. lookup: SigridLookupPort
@@ -85,6 +86,9 @@ class RecursoConciliador:
         # CanDefecto (candef vacio): se resta esta cantidad y el resto va
         # a extra.
         self._jornada = float(jornada_ordinaria_horas)
+        # CanDefecto <= a este umbral se trata como no informado y se usa
+        # la jornada por defecto (evita que un 0/1/2 mande todo a extra).
+        self._candef_min = float(candef_minimo)
         self._ttl = int(ttl_seconds)
         self._lock = threading.RLock()
         # maestro de recursos: maps conide->ide, cif_norm->ide, ide->RecursoRow
@@ -412,6 +416,10 @@ class RecursoConciliador:
             if hora_ext is None:
                 continue  # sin hora extra del recurso: no se puede crear
 
+            # CanDefecto real del recurso (lo que dice Sigrid; puede ser
+            # None/0/2...). Se PERSISTE tal cual para diagnostico; el
+            # calculo usa el "efectivo".
+            candef_real = hsel.get("candef")
             if self._es_no_laborable(fecha_int, regs):
                 # Fin de semana / festivo: NO hay jornada ordinaria, TODO
                 # el trabajo pasa a extra (aunque ya haya extra explicita).
@@ -425,10 +433,13 @@ class RecursoConciliador:
                 # D-B: si ya hay extra EXPLICITA ese dia, respetar desglose.
                 if any(_tipo(x) == "extra" for x in regs):
                     continue
-                candef = hsel.get("candef")
-                # Si el recurso no informa CanDefecto, jornada por defecto.
+                # CanDefecto no valido (vacio o <= minimo) -> jornada por
+                # defecto: evita que un 0/1/2 mande TODAS las horas a extra.
                 candef_efectivo = (
-                    float(candef) if candef is not None else self._jornada
+                    float(candef_real)
+                    if candef_real is not None
+                    and float(candef_real) > self._candef_min
+                    else self._jornada
                 )
 
             ordinarios = [x for x in regs if _tipo(x) in ("", "normal")]
@@ -455,7 +466,7 @@ class RecursoConciliador:
                     "hora_ext_cod": hora_ext.cod,
                     "hora_ext_desc": hora_ext.res,
                     "hora_ext_ext": hora_ext.ext,
-                    "hora_candef": candef_efectivo,
+                    "hora_candef": candef_real,
                 })
                 restante -= porcion
         return splits

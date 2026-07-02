@@ -91,6 +91,7 @@ def build_app(settings: Settings) -> FastAPI:
                 path=settings.calendario_laboral_path
             ),
             jornada_ordinaria_horas=settings.jornada_ordinaria_horas,
+            candef_minimo=settings.candef_minimo_valido,
         )
         logger.info(
             "[svc3][wiring] Sigrid CABLEADO base_url=%s db=%s empresa=%s",

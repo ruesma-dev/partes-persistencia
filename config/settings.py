@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # se reparte a extras de forma determinista. Preparado para jornada de
     # verano (luego se podra hacer dependiente de la fecha).
     jornada_ordinaria_horas: float = Field(8.0, alias="JORNADA_ORDINARIA_HORAS")
+    # CanDefecto (horas) <= a este umbral se considera NO informado en
+    # Sigrid: el reparto usa la jornada por defecto en su lugar.
+    candef_minimo_valido: float = Field(2.0, alias="CANDEF_MINIMO_VALIDO")
 
     # Calendario laboral (fin de semana + festivos). En fin de semana o
     # festivo no hay horas ordinarias: el reparto las manda todas a extra.
