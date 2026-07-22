@@ -46,7 +46,7 @@ _YEAR_RE = re.compile(r"\b(20\d{2})\b")
 class FechaResuelta:
     iso: str | None
     fecha_int: int | None
-    method: str   # email_mes | parte_fecha | parte_fecha_anio_corregido | none
+    method: str   # leido | leido_pasado | futuro_corregido | inferido | none (+ '+email_mes')
 
 
 def _strip_accents(text: str) -> str:
@@ -160,20 +160,55 @@ class FechaParteResolver:
             return FechaResuelta(None, None, "none")
 
         # ANIO: se CONFIA en el leido (email o parte) si forma una fecha
-        # VALIDA y no es futuro respecto a hoy (un parte no puede ser del
-        # futuro). Solo si falta el anio, es futuro, o la fecha resultante es
-        # invalida (p.ej. 29/02 en anio no bisiesto), se infiere la ocurrencia
-        # mas reciente del mes: mes posterior al de hoy => anio anterior.
+        # VALIDA en el rango [min_year .. hoy]. Casos especiales:
+        #
+        #   - Anio FUTURO (> hoy): un parte no puede ser del futuro. Se
+        #     corrige al anio en curso (misma ocurrencia del mes/dia), pero
+        #     se registra como ERROR: casi siempre es un error de fecha del
+        #     parte que hay que revisar.
+        #   - Anio PASADO (< hoy pero valido y >= min_year): se RESPETA tal
+        #     cual (el parte puede ser de un cierre anterior); solo se avisa
+        #     con un WARNING para que quede rastro.
+        #   - Sin anio / anio corrupto (< min_year) / fecha invalida: se
+        #     infiere la ocurrencia mas reciente del mes (mes posterior al de
+        #     hoy => anio anterior).
         eff_year: int | None = None
         method = "leido"
+
+        # 1) Anio leido valido y NO futuro -> se confia (respetando pasados).
         for cand in (em_year, year):
             if (cand and self._min_year <= cand <= today.year
                     and _valid(cand, eff_month, day)):
                 eff_year = cand
+                if cand < today.year:
+                    method = "leido_pasado"
+                    logger.warning(
+                        "[fecha-resolver] anio PASADO respetado: %s "
+                        "(raw=%r email_mes=%s). Se mantiene tal cual.",
+                        cand, raw_fecha, em_year,
+                    )
                 break
+
+        # 2) Anio FUTURO plausible leido -> corregir a hoy, pero ERROR.
+        if eff_year is None:
+            for cand in (em_year, year):
+                if (cand and cand > today.year
+                        and _valid(today.year, eff_month, day)):
+                    eff_year = today.year
+                    method = "futuro_corregido"
+                    logger.error(
+                        "[fecha-resolver] anio FUTURO %s corregido a %s "
+                        "(raw=%r email_mes=%s). REVISAR: un parte no puede "
+                        "ser del futuro.",
+                        cand, today.year, raw_fecha, em_year,
+                    )
+                    break
+
+        # 3) Sin anio utilizable -> inferir la ocurrencia mas reciente.
         if eff_year is None:
             eff_year = today.year if eff_month <= today.month else today.year - 1
             method = "inferido"
+
         if em_month is not None and em_month != month:
             method = method + "+email_mes"
 

@@ -62,15 +62,38 @@ def _token_en(token: str, folded: set[str]) -> bool:
     f = tm.phonetic_fold(token)
     if f in folded:
         return True
-    return any(tm._osa_distance(f, pf) <= 1 for pf in folded)
+    for pf in folded:
+        if tm._osa_distance(f, pf) <= 1:
+            return True
+        # Abreviaturas: "OFIC." casa "OFICIAL", "ADMIN" casa
+        # "ADMINISTRATIVO". Prefijo de al menos 4 letras en cualquier
+        # sentido (evita falsos positivos de prefijos cortos).
+        if len(f) >= 4 and pf.startswith(f):
+            return True
+        if len(pf) >= 4 and f.startswith(pf):
+            return True
+    return False
 
 
 def _score_rol(categoria: str | None, rol_folded: set[str]) -> float:
+    """Casado categoria<->rol en AMBOS sentidos: cuenta tanto la fraccion
+    de tokens de la CATEGORIA cubiertos por el rol como la fraccion de
+    tokens del ROL cubiertos por la categoria, y se queda con la mayor.
+    Asi "OFIC. 1a ALBANIL" casa la partida "OFICIAL" (el rol entero esta
+    contenido en la categoria) aunque la categoria traiga mas apellidos."""
     cats = _content_tokens(categoria)
     if not cats:
         return 0.0
-    hits = sum(1 for t in cats if _token_en(t, rol_folded))
-    return hits / len(cats)
+    hits_cat = sum(1 for t in cats if _token_en(t, rol_folded))
+    score_cat = hits_cat / len(cats)
+    cat_folded = _folded(cats)
+    roles = list(rol_folded)
+    if roles and cat_folded:
+        hits_rol = sum(1 for t in roles if _token_en(t, cat_folded))
+        score_rol = hits_rol / len(roles)
+    else:
+        score_rol = 0.0
+    return max(score_cat, score_rol)
 
 
 def _rol_exacto(categoria: str | None, rol_texto: str) -> bool:

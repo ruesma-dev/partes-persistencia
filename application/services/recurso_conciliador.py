@@ -395,11 +395,33 @@ class RecursoConciliador:
         ride_por_reg: dict[int, int],
         reshor_idx: dict[int, dict],
     ) -> list[dict]:
-        """Por (recurso, dia) reuniendo TODAS las obras: si NO hay extra
-        EXPLICITA y la suma de horas ordinarias supera el CanDefecto del
-        recurso, pasa el exceso a extra empezando por los registros de mayor
-        id (ultimas obras creadas), partiendo el registro donde caiga el
-        corte. Solo calcula los 'splits'; la BD la toca el repositorio."""
+        """Normaliza el desglose ordinaria/extra por (recurso, dia) reuniendo
+        TODAS las obras. Regla en DIA LABORABLE: se suman las horas normales
+        Y las extras del dia y se comparan con el CanDefecto efectivo; las
+        ordinarias finales son el CanDefecto y la extra es LA RESTA
+        (total - candef), que puede salir NEGATIVA (viernes tipico: trabaja 6
+        con jornada 8 -> ordinaria 8, extra -2).
+
+        - Si falta extra (total > candef + extras explicitas): se recorta lo
+          ordinario a extra empezando por los registros de mayor id, como
+          siempre.
+        - Si sobra (extra negativa o extras explicitas por encima de la
+          resta): se SUBE el registro ordinario de mayor id hasta cuadrar la
+          jornada y se crea UNA extra automatica con horas NEGATIVAS (las
+          extras explicitas del parte no se tocan; el neto queda correcto).
+        - Dias laborables SIN horas ordinarias (solo extras explicitas o
+          incidencias) no se normalizan: se respeta el desglose del parte.
+        - Fin de semana / festivo: sin jornada ordinaria, TODO lo ordinario
+          pasa a extra (igual que antes).
+        - RECURSO SIN CODIGO DE HORA EXTRA (p.ej. mensuales tipo encargado):
+          NO se normaliza nada. Se respetan las horas del parte tal cual
+          (ordinarias y extras) y se emite un WARNING: esas extras no tienen
+          codigo de hora extra en Sigrid, por lo que al traspasarlas se
+          quedaran a CERO.
+
+        Solo calcula los 'splits'; la BD la toca el repositorio (que antes
+        revierte las extras automaticas previas, asi el calculo parte siempre
+        del desglose original del parte)."""
         grupos: dict[tuple[int, int | None], list[dict]] = defaultdict(list)
         for r in registros:
             ride = ride_por_reg.get(r["registro_id"])
@@ -414,24 +436,52 @@ class RecursoConciliador:
                 continue
             hora_ext = hsel.get("ext")
             if hora_ext is None:
-                continue  # sin hora extra del recurso: no se puede crear
+                # Recurso SIN codigo de hora extra en Sigrid (p.ej. mensuales
+                # tipo encargado, codigo MENC): NO se calcula nada, se dejan
+                # las horas del parte tal cual (ordinarias y extras). Aviso de
+                # que esas extras se quedaran a CERO al traspasarlas, por no
+                # existir un codigo de hora extra al que imputarlas.
+                horas_extra_dia = sum(
+                    (x.get("horas") or 0.0)
+                    for x in regs if _tipo(x) == "extra"
+                )
+                if abs(horas_extra_dia) > 1e-9:
+                    logger.warning(
+                        "[recurso-concil] recurso=%s dia=%s SIN codigo de "
+                        "hora extra: se respetan las horas del parte, pero "
+                        "las %.2f h extra se traspasaran a CERO.",
+                        ride, self._fecha_int_to_iso(fecha_int),
+                        horas_extra_dia,
+                    )
+                continue
 
             # CanDefecto real del recurso (lo que dice Sigrid; puede ser
             # None/0/2...). Se PERSISTE tal cual para diagnostico; el
             # calculo usa el "efectivo".
             candef_real = hsel.get("candef")
+            ordinarios = [x for x in regs if _tipo(x) in ("", "normal")]
+            total_ord = sum((x.get("horas") or 0.0) for x in ordinarios)
+            total_ext = sum(
+                (x.get("horas") or 0.0) for x in regs if _tipo(x) == "extra"
+            )
+
             if self._es_no_laborable(fecha_int, regs):
                 # Fin de semana / festivo: NO hay jornada ordinaria, TODO
-                # el trabajo pasa a extra (aunque ya haya extra explicita).
-                candef_efectivo = 0.0
+                # el trabajo ordinario pasa a extra (las extras explicitas
+                # ya lo son).
+                delta = total_ord
+                if delta <= 1e-9:
+                    continue
                 logger.info(
                     "[recurso-concil] dia NO laborable %s (recurso=%s): "
                     "horas ordinarias -> extra.",
                     self._fecha_int_to_iso(fecha_int), ride,
                 )
             else:
-                # D-B: si ya hay extra EXPLICITA ese dia, respetar desglose.
-                if any(_tipo(x) == "extra" for x in regs):
+                # DIA LABORABLE: normales + extras comparadas con el
+                # CanDefecto efectivo. extra objetivo = total - candef
+                # (puede ser NEGATIVA). Sin ordinarias no se normaliza.
+                if total_ord <= 1e-9:
                     continue
                 # CanDefecto no valido (vacio o <= minimo) -> jornada por
                 # defecto: evita que un 0/1/2 mande TODAS las horas a extra.
@@ -441,34 +491,62 @@ class RecursoConciliador:
                     and float(candef_real) > self._candef_min
                     else self._jornada
                 )
-
-            ordinarios = [x for x in regs if _tipo(x) in ("", "normal")]
-            total = sum((x.get("horas") or 0.0) for x in ordinarios)
-            if total <= candef_efectivo + 1e-9:
-                continue
-            restante = total - candef_efectivo
-            # Las ultimas horas del dia (registros creados despues = id mayor).
-            for x in sorted(
-                ordinarios, key=lambda z: z["registro_id"], reverse=True
-            ):
-                if restante <= 1e-9:
-                    break
-                h = x.get("horas") or 0.0
-                if h <= 0:
+                total = total_ord + total_ext
+                objetivo_extra = total - candef_efectivo
+                # Lo que falta (o sobra) respecto a las extras explicitas.
+                delta = objetivo_extra - total_ext
+                if abs(delta) <= 1e-9:
                     continue
-                porcion = h if h <= restante + 1e-9 else restante
+
+            orden = sorted(
+                ordinarios, key=lambda z: z["registro_id"], reverse=True
+            )
+            if delta > 0:
+                # Falta extra: recortar ordinarias empezando por las ultimas
+                # horas del dia (registros creados despues = id mayor).
+                restante = delta
+                for x in orden:
+                    if restante <= 1e-9:
+                        break
+                    h = x.get("horas") or 0.0
+                    if h <= 0:
+                        continue
+                    porcion = h if h <= restante + 1e-9 else restante
+                    splits.append({
+                        "normal_id": x["registro_id"],
+                        "horas_norm": round(h - porcion, 2),
+                        "horas_orig": h,
+                        "extra_horas": round(porcion, 2),
+                        "hora_ext_ide": hora_ext.horide,
+                        "hora_ext_cod": hora_ext.cod,
+                        "hora_ext_desc": hora_ext.res,
+                        "hora_ext_ext": hora_ext.ext,
+                        "hora_candef": candef_real,
+                    })
+                    restante -= porcion
+            else:
+                # Sobra: jornada incompleta (o extras explicitas por encima
+                # de la resta). Se sube el ordinario de mayor id hasta
+                # completar la jornada y se crea UNA extra NEGATIVA por la
+                # diferencia; el total del dia se conserva.
+                pivote = orden[0]
+                h = pivote.get("horas") or 0.0
                 splits.append({
-                    "normal_id": x["registro_id"],
-                    "horas_norm": round(h - porcion, 2),
+                    "normal_id": pivote["registro_id"],
+                    "horas_norm": round(h - delta, 2),   # delta<0 -> sube
                     "horas_orig": h,
-                    "extra_horas": round(porcion, 2),
+                    "extra_horas": round(delta, 2),      # negativa
                     "hora_ext_ide": hora_ext.horide,
                     "hora_ext_cod": hora_ext.cod,
                     "hora_ext_desc": hora_ext.res,
                     "hora_ext_ext": hora_ext.ext,
                     "hora_candef": candef_real,
                 })
-                restante -= porcion
+                logger.info(
+                    "[recurso-concil] jornada incompleta %s (recurso=%s): "
+                    "ordinaria %+.2f, extra %.2f.",
+                    self._fecha_int_to_iso(fecha_int), ride, -delta, delta,
+                )
         return splits
 
     # ----- calendario laboral (fin de semana / festivos) ----- #

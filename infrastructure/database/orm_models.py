@@ -158,6 +158,13 @@ class ParteRegistroOrm(Base):
 
     # --- Tipo de registro --- #
     tipo_hora: Mapped[str | None] = mapped_column(String(16))  # normal|extra|V|B|...
+
+    # --- Borrado a nivel LINEA (soft delete -> papelera de sv4). --- #
+    # NULL = activo. Lo escribe sv4; sv3 SOLO LO LEE para EXCLUIR estas
+    # lineas de las conciliaciones (partida, recurso y reparto de jornada).
+    deleted_at_utc: Mapped[str | None] = mapped_column(String(64), index=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(255))
+
     es_incidencia: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
