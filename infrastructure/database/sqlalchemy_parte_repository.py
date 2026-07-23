@@ -67,10 +67,6 @@ _DDL_ALTERS = (
     "horas_orig DOUBLE PRECISION",
     "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
     "extra_auto BOOLEAN NOT NULL DEFAULT false",
-    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
-    "deleted_at_utc VARCHAR(64)",
-    "ALTER TABLE parte_registros ADD COLUMN IF NOT EXISTS "
-    "deleted_by VARCHAR(255)",
 )
 
 
@@ -129,25 +125,24 @@ class SqlAlchemyParteRepository:
                     ParteRegistroOrm.empleado_nombre,
                     ParteRegistroOrm.trabajador_nombre_leido,
                     ParteRegistroOrm.partida_match_method,
+                    ParteRegistroOrm.partida,
                 )
                 .join(
                     ParteDocumentOrm,
                     ParteRegistroOrm.document_id == ParteDocumentOrm.id,
                 )
                 .where(ParteDocumentOrm.is_active.is_(True))
-                # Lineas en papelera (soft-delete de sv4): fuera del casado.
-                .where(ParteRegistroOrm.deleted_at_utc.is_(None))
             )
             out: list[dict] = []
-            for rid, obra_ide, cat, emp_nom, leido, metodo in session.execute(
-                stmt
-            ).all():
+            for (rid, obra_ide, cat, emp_nom, leido, metodo,
+                 partida_leida) in session.execute(stmt).all():
                 out.append({
                     "registro_id": rid,
                     "obra_ide": obra_ide,
                     "categoria": cat,
                     "nombre": emp_nom or leido,
                     "partida_match_method": metodo,
+                    "partida_leida": partida_leida,
                 })
             return out
 
@@ -202,9 +197,6 @@ class SqlAlchemyParteRepository:
                     ParteRegistroOrm.document_id == ParteDocumentOrm.id,
                 )
                 .where(ParteDocumentOrm.is_active.is_(True))
-                # Lineas en papelera (soft-delete de sv4): NO cuentan en el
-                # total del dia ni en el reparto ordinaria/extra.
-                .where(ParteRegistroOrm.deleted_at_utc.is_(None))
             )
             out: list[dict] = []
             for (rid, obra_ide, emp_ide, reside, dni, fint, tipo_hora,
@@ -264,7 +256,7 @@ class SqlAlchemyParteRepository:
         with self._session_factory.create_session() as session:
             for s in splits:
                 normal = session.get(ParteRegistroOrm, s["normal_id"])
-                if normal is None or normal.deleted_at_utc:
+                if normal is None:
                     continue
                 if normal.horas_orig is None:
                     normal.horas_orig = s["horas_orig"]

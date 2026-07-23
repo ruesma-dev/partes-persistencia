@@ -134,6 +134,7 @@ class ParteNormalizer:
             if not isinstance(emp, dict):
                 continue
             nombre = _opt_str(emp.get("nombre"))
+            dni_leido = _opt_str(emp.get("dni"))
             categoria = _opt_str(emp.get("categoria"))
             numero_linea = _opt_int(emp.get("numero_linea"))
             confianza = _opt_float(emp.get("confianza_pct"))
@@ -141,6 +142,17 @@ class ParteNormalizer:
             horas_extra = _opt_float(emp.get("horas_extraordinarias"))
             cod_ord = _opt_str(emp.get("codigo_hora_ordinaria"))
             cod_extra = _opt_str(emp.get("codigo_hora_extra"))
+
+            # Reparto por PARTIDAS del presupuesto (seccion derecha del
+            # parte, J.310 rev. 1): lista de (codigo, horas|None).
+            asignaciones: list[tuple[str, float | None]] = []
+            for a in emp.get("partidas") or []:
+                if not isinstance(a, dict):
+                    continue
+                p_cod = _opt_str(a.get("partida"))
+                p_hrs = _opt_float(a.get("horas"))
+                if p_cod:
+                    asignaciones.append((p_cod, p_hrs))
 
             inc_raw = emp.get("incidencia")
             incidencia: IncidenciaInfo | None = None
@@ -168,6 +180,7 @@ class ParteNormalizer:
                 empleado_line_no=numero_linea,
                 categoria=categoria,
                 trabajador_nombre_leido=nombre,
+                trabajador_dni_leido=dni_leido,
                 confianza_pct=confianza,
             )
 
@@ -179,26 +192,84 @@ class ParteNormalizer:
             ord_eff = horas_ord
             extra_eff = horas_extra
 
-            if ord_eff and ord_eff > 0:
+            # Reparto de horas entre partidas (si el parte lo trae):
+            #  - asignacion CON horas: consume esas horas empezando por las
+            #    ORDINARIAS (y sigue con las extra si no alcanzan).
+            #  - asignacion SIN horas ("abierta"): recibe TODO el resto.
+            #  - resto sin asignacion abierta: partida None (la elegira el
+            #    conciliador automatico por categoria, capitulo CI).
+            ord_parts: list[tuple[float, str | None]] = []
+            extra_parts: list[tuple[float, str | None]] = []
+            ord_pos = float(ord_eff) if ord_eff and ord_eff > 0 else 0.0
+            extra_pos = float(extra_eff) if extra_eff and extra_eff > 0 else 0.0
+
+            if asignaciones and (ord_pos > 0 or extra_pos > 0):
+                explicitas = [(c, float(h)) for c, h in asignaciones
+                              if h is not None and h > 0]
+                abiertas = [c for c, h in asignaciones
+                            if h is None or h <= 0]
+                if len(abiertas) > 1:
+                    logger.warning(
+                        "[parte-normalizer] empleado=%r: %s partidas SIN "
+                        "horas (%s); el resto de horas va SOLO a la primera",
+                        nombre, len(abiertas), abiertas,
+                    )
+                rem_ord, rem_extra = ord_pos, extra_pos
+                for p_cod, p_hrs in explicitas:
+                    pend = p_hrs
+                    take = min(pend, rem_ord)
+                    if take > 0:
+                        ord_parts.append((take, p_cod))
+                        rem_ord -= take
+                        pend -= take
+                    if pend > 1e-9:
+                        take = min(pend, rem_extra)
+                        if take > 0:
+                            extra_parts.append((take, p_cod))
+                            rem_extra -= take
+                            pend -= take
+                    if pend > 1e-9:
+                        logger.warning(
+                            "[parte-normalizer] empleado=%r partida=%r: "
+                            "asignadas %s h pero el parte solo tiene %s h "
+                            "(ord+extra); se capa al total",
+                            nombre, p_cod, p_hrs, ord_pos + extra_pos,
+                        )
+                resto = abiertas[0] if abiertas else None
+                if rem_ord > 0:
+                    ord_parts.append((rem_ord, resto))
+                if rem_extra > 0:
+                    extra_parts.append((rem_extra, resto))
+                if not extra_parts and extra_eff and extra_eff < 0:
+                    extra_parts.append((float(extra_eff), resto))
+            else:
+                if ord_pos > 0:
+                    ord_parts.append((ord_pos, None))
+                if extra_eff and (extra_pos > 0 or extra_eff < 0):
+                    extra_parts.append((float(extra_eff), None))
+
+            for p_horas, p_cod in ord_parts:
                 parte.registros.append(
                     RegistroNormalizado(
                         line_index=line_index,
                         tipo_hora="normal",
                         es_incidencia=False,
-                        horas=ord_eff,
+                        horas=p_horas,
+                        partida=p_cod,
                         codigo_hora_propuesto=cod_ord,
                         **base,
                     )
                 )
                 line_index += 1
 
-            if extra_eff and extra_eff > 0:
+            for p_horas, p_cod in extra_parts:
                 parte.registros.append(
                     RegistroNormalizado(
                         line_index=line_index,
                         tipo_hora="extra",
                         es_incidencia=False,
-                        horas=extra_eff,
+                        horas=p_horas,
+                        partida=p_cod,
                         codigo_hora_propuesto=cod_extra,
                         **base,
                     )

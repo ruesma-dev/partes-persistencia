@@ -226,28 +226,41 @@ class PersistPartePipeline:
 
         for reg in parte.registros:
             nombre = reg.trabajador_nombre_leido or ""
-            key = nombre.strip().lower()
+            dni_leido = (reg.trabajador_dni_leido or "").strip()
+            key = dni_leido.upper() + "|" + nombre.strip().lower()
             if key in emp_cache:
                 reg.empleado = emp_cache[key]
             else:
-                # 1) Alias aprendido (casado confirmado en conciliacion):
-                #    casa de forma EXACTA las variantes recurrentes de OCR.
-                alias = self._repository.find_empleado_alias(
-                    reg.trabajador_nombre_leido
-                )
-                if alias is not None:
-                    match = EmpleadoMatch(
-                        ide=alias["ide"], codigo=alias["codigo"],
-                        nombre=alias["nombre"], dni=alias["dni"],
-                        reside=None, score=1.0, method="alias",
+                match: EmpleadoMatch | None = None
+                # 0) DNI leido del parte (J.310 rev. 1): PRIORIDAD ABSOLUTA.
+                #    Si el maestro lo resuelve por DNI exacto, gana sobre el
+                #    alias y sobre cualquier similitud de nombre.
+                if dni_leido:
+                    m = matchers.empleado.match(
+                        nombre=None, dni=dni_leido, codigo=None
                     )
-                else:
-                    # 2) Similitud contra el maestro (algoritmo mejorado).
-                    match = matchers.empleado.match(
-                        nombre=reg.trabajador_nombre_leido,
-                        dni=None,
-                        codigo=None,
+                    if m.method == "dni":
+                        match = m
+                if match is None:
+                    # 1) Alias aprendido (casado confirmado en conciliacion):
+                    #    casa de forma EXACTA las variantes recurrentes de OCR.
+                    alias = self._repository.find_empleado_alias(
+                        reg.trabajador_nombre_leido
                     )
+                    if alias is not None:
+                        match = EmpleadoMatch(
+                            ide=alias["ide"], codigo=alias["codigo"],
+                            nombre=alias["nombre"], dni=alias["dni"],
+                            reside=None, score=1.0, method="alias",
+                        )
+                    else:
+                        # 2) Similitud contra el maestro (con el DNI como
+                        #    apoyo por si el maestro puede resolverlo).
+                        match = matchers.empleado.match(
+                            nombre=reg.trabajador_nombre_leido,
+                            dni=dni_leido or None,
+                            codigo=None,
+                        )
                 emp_cache[key] = match
                 reg.empleado = match
 

@@ -16,9 +16,10 @@ from pathlib import Path
 from application.pipelines.persist_parte_pipeline import PersistParteRequest
 from config.logging_config import configure_logging
 from config.settings import Settings
-from infrastructure.azure.blob_cliente import BlobCliente
-from infrastructure.azure.cola_cliente import ColaCliente
-from infrastructure.azure.credenciales import build_credential
+from infrastructure.azure.credenciales import (
+    construir_blob_cliente,
+    construir_cola_cliente,
+)
 from interface_adapters.api.app import build_app
 
 logger = logging.getLogger(__name__)
@@ -33,12 +34,30 @@ def main() -> int:
     configure_logging(Path(settings.log_dir), settings.log_level)
     logger.info("[sv3-worker] arrancando. cola=%s", COLA_ENTRADA)
 
-    cred = build_credential()
-    cola = ColaCliente(
-        os.environ["COLAS_ACCOUNT_URL"], cred,
+    colas_cs = settings.colas_connection_string
+    colas_url = settings.colas_account_url or os.getenv("COLAS_ACCOUNT_URL")
+    if not colas_cs and not colas_url:
+        logger.error(
+            "[sv3-worker] falta storage: define COLAS_CONNECTION_STRING "
+            "(local/Azurite) o COLAS_ACCOUNT_URL (nube) en el .env / "
+            "Container App."
+        )
+        return 1
+
+    cola = construir_cola_cliente(
+        connection_string=colas_cs, account_url=colas_url,
         visibility_timeout_s=int(os.getenv("COLA_VISIBILITY_S", "300")),
     )
-    blob = BlobCliente(os.environ["BLOBS_ACCOUNT_URL"], cred)
+    blob = construir_blob_cliente(
+        connection_string=settings.blobs_connection_string,
+        account_url=settings.blobs_account_url
+        or os.getenv("BLOBS_ACCOUNT_URL"),
+        colas_connection_string=colas_cs,
+    )
+    if colas_cs:
+        # Modo local (Azurite arranca vacio): asegura colas y contenedores.
+        cola.asegurar_colas([COLA_ENTRADA])
+        blob.asegurar_contenedores([CONTENEDOR_INPUT, CONTENEDOR_ENVELOPES])
     pipeline = build_app(settings).state.pipeline
 
     def handler(payload: dict) -> None:

@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------ #
     # BBDD (PostgreSQL). DB propia 'partes' (compartida con sv4).
     # ------------------------------------------------------------ #
+    # --- Azure Storage (colas/blobs del pipeline). En Azure las inyecta la
+    # Container App; en local se leen del .env como el resto de config. --- #
+    # Connection strings para LOCAL (Azurite o cuenta con clave). Si estan,
+    # MANDAN sobre las account_url + identidad. BLOBS se deriva de COLAS si
+    # falta (Azurite: puerto 10001 -> 10000).
+    colas_connection_string: str | None = Field(
+        None, alias="COLAS_CONNECTION_STRING"
+    )
+    blobs_connection_string: str | None = Field(
+        None, alias="BLOBS_CONNECTION_STRING"
+    )
+
+    colas_account_url: str | None = Field(None, alias="COLAS_ACCOUNT_URL")
+    blobs_account_url: str | None = Field(None, alias="BLOBS_ACCOUNT_URL")
+
     pg_host: str = Field("localhost", alias="PG_HOST")
     pg_port: int = Field(5432, alias="PG_PORT")
     pg_db: str = Field("partes", alias="PG_DB")

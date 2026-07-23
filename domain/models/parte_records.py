@@ -67,6 +67,8 @@ class RegistroNormalizado:
     empleado_line_no: Optional[int] = None       # Nº de fila del parte
     categoria: Optional[str] = None
     trabajador_nombre_leido: Optional[str] = None
+    # DNI leido del parte (columna DNI de J.310 rev. 1+); None en rev. 0.
+    trabajador_dni_leido: Optional[str] = None
     empleado: EmpleadoMatch = field(default_factory=EmpleadoMatch)
 
     tipo_hora: Optional[str] = None              # normal | extra | V|B|AT|...

@@ -23,22 +23,48 @@ logger = logging.getLogger(__name__)
 class ColaCliente:
     def __init__(
         self,
-        account_url: str,
-        credential,
+        account_url: str | None = None,
+        credential=None,
         *,
+        connection_string: str | None = None,
         max_dequeue: int = 5,
         visibility_timeout_s: int = 600,
         poll_interval_s: int = 5,
     ) -> None:
-        if not account_url:
-            raise ValueError("ColaCliente requiere COLAS_ACCOUNT_URL.")
-        self._account_url = account_url.rstrip("/")
-        self._cred = credential
-        self._svc = QueueServiceClient(account_url=account_url, credential=credential)
+        # Dos modos (patron albaranes):
+        #  - connection_string: local/Azurite (o cuenta con clave).
+        #  - account_url + credential: nube (managed identity / az login).
+        if connection_string:
+            self._svc = QueueServiceClient.from_connection_string(
+                connection_string
+            )
+        elif account_url:
+            self._svc = QueueServiceClient(
+                account_url=account_url.rstrip("/"), credential=credential
+            )
+        else:
+            raise ValueError(
+                "ColaCliente requiere COLAS_CONNECTION_STRING (local/Azurite)"
+                " o COLAS_ACCOUNT_URL (nube)."
+            )
         self._max_dequeue = int(max_dequeue)
         self._vt = int(visibility_timeout_s)
         self._poll = int(poll_interval_s)
         self._stop = False
+
+    def asegurar_colas(self, nombres: list[str]) -> None:
+        """Crea las colas (y sus '-poison') si no existen. Para el modo
+        local con Azurite, que arranca vacio; idempotente."""
+        from azure.core.exceptions import ResourceExistsError
+        todos: list[str] = []
+        for n in nombres:
+            todos.extend((n, f"{n}-poison"))
+        for n in todos:
+            try:
+                self._svc.create_queue(n)
+                logger.info("[cola] creada cola '%s'", n)
+            except ResourceExistsError:
+                pass
 
     # -- Productor ----------------------------------------------------------
     def enviar(self, queue_name: str, payload: dict) -> None:

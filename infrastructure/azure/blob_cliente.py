@@ -15,10 +15,40 @@ logger = logging.getLogger(__name__)
 
 
 class BlobCliente:
-    def __init__(self, account_url: str, credential) -> None:
-        if not account_url:
-            raise ValueError("BlobCliente requiere BLOBS_ACCOUNT_URL.")
-        self._svc = BlobServiceClient(account_url=account_url, credential=credential)
+    def __init__(
+        self,
+        account_url: str | None = None,
+        credential=None,
+        *,
+        connection_string: str | None = None,
+    ) -> None:
+        # Dos modos (patron albaranes):
+        #  - connection_string: local/Azurite (o cuenta con clave).
+        #  - account_url + credential: nube (managed identity / az login).
+        if connection_string:
+            self._svc = BlobServiceClient.from_connection_string(
+                connection_string
+            )
+        elif account_url:
+            self._svc = BlobServiceClient(
+                account_url=account_url, credential=credential
+            )
+        else:
+            raise ValueError(
+                "BlobCliente requiere BLOBS_CONNECTION_STRING (local/Azurite)"
+                " o BLOBS_ACCOUNT_URL (nube)."
+            )
+
+    def asegurar_contenedores(self, nombres: list[str]) -> None:
+        """Crea los contenedores si no existen (modo local con Azurite;
+        idempotente)."""
+        from azure.core.exceptions import ResourceExistsError
+        for n in nombres:
+            try:
+                self._svc.create_container(n)
+                logger.info("[blob] creado contenedor '%s'", n)
+            except ResourceExistsError:
+                pass
 
     def subir(self, container: str, name: str, data: bytes,
               content_type: str | None = None) -> None:
